@@ -1,3 +1,13 @@
+## PDFDataInjector.py
+# A Tkinter application to inject data from an Excel file into a PDF template.
+# It allows users to select a PDF template, an Excel data file, and an output directory,
+# and dynamically place text fields on the PDF based on the Excel data.
+# The application supports zooming, panning, and RTL text handling for Arabic text.
+# It also provides a preview of the PDF with the injected data.
+# and _on_canvas_b1_motion.
+# If a marker was being dragged, it will be handled by the marker's own bindings.
+# version 1.00
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, font as tkFont, simpledialog, ttk
 import pandas as pd
@@ -261,6 +271,11 @@ class PDFBatchApp:
         if not self.pdf_doc:
             return
 
+        # Get mouse position on canvas (relative to the top-left of the scrollable content)
+        # and widget coordinates (relative to the canvas widget itself)
+        mouse_x_on_image_before_zoom = self.canvas.canvasx(event.x)
+        mouse_y_on_image_before_zoom = self.canvas.canvasy(event.y)
+
         factor_change = 0
         # Respond to Linux wheel events
         if event.num == 4: # Scroll up
@@ -274,16 +289,68 @@ class PDFBatchApp:
             factor_change = -0.1
         
         if factor_change != 0:
-            self.zoom(factor_change)
+            # Pass mouse coordinates to the zoom function
+            self.zoom(factor_change, mouse_x_on_image_before_zoom, mouse_y_on_image_before_zoom, event.x, event.y)
 
-    def zoom(self, factor_change):
+    def zoom(self, factor_change, mouse_x_img_old=None, mouse_y_img_old=None, mouse_widget_x=None, mouse_widget_y=None):
+        """
+        Zooms the PDF preview.
+        If mouse coordinates are provided, zooms towards the mouse cursor.
+        Otherwise (e.g., for button clicks), attempts to maintain the current view.
+        """
         if not self.pdf_doc:
             return
-        new_zoom = self.current_zoom_factor.get() + factor_change # Min 20%, Max 500% zoom
-        if 0.2 <= new_zoom <= 5.0: 
-            self.current_zoom_factor.set(round(new_zoom, 2))
-            self.zoom_display_var.set(f"Zoom: {int(self.current_zoom_factor.get() * 100)}%")
-            self._redisplay_pdf_page()
+
+        old_zoom = self.current_zoom_factor.get()
+        potential_new_zoom = old_zoom + factor_change
+
+        # Clamp new_zoom to min/max values
+        if potential_new_zoom < 0.2:
+            new_zoom = 0.2
+        elif potential_new_zoom > 5.0:
+            new_zoom = 5.0
+        else:
+            new_zoom = round(potential_new_zoom, 2)
+
+        if new_zoom == old_zoom:  # No actual change in zoom level
+            return
+
+        # Store old scroll fractions if this is a button zoom (no mouse coords)
+        old_view_x_fraction = 0.0
+        old_view_y_fraction = 0.0
+        if mouse_x_img_old is None: # Indicates a button press or other non-mouse-centric zoom
+            old_view_x_fraction = self.canvas.xview()[0]
+            old_view_y_fraction = self.canvas.yview()[0]
+
+        self.current_zoom_factor.set(new_zoom)
+        self.zoom_display_var.set(f"Zoom: {int(new_zoom * 100)}%")
+        
+        self._redisplay_pdf_page() # This updates self.image_on_canvas_width_px etc. based on new_zoom
+
+        if mouse_x_img_old is not None and mouse_y_img_old is not None and \
+           mouse_widget_x is not None and mouse_widget_y is not None and old_zoom > 0:
+            
+            # Point on the original unzoomed PDF (or its 100% zoom canvas equivalent) that was under the mouse.
+            original_point_x = mouse_x_img_old / old_zoom
+            original_point_y = mouse_y_img_old / old_zoom
+
+            # New coordinates of this point on the *newly-zoomed* image
+            new_target_image_x = original_point_x * new_zoom
+            new_target_image_y = original_point_y * new_zoom
+
+            # We want this new_target_image_x/y to be under the mouse cursor's widget position (mouse_widget_x, mouse_widget_y).
+            # So, the new top-left of the view (scroll position) should be:
+            new_scroll_x = new_target_image_x - mouse_widget_x
+            new_scroll_y = new_target_image_y - mouse_widget_y
+            
+            fraction_x = new_scroll_x / self.image_on_canvas_width_px if self.image_on_canvas_width_px > 0 else 0
+            fraction_y = new_scroll_y / self.image_on_canvas_height_px if self.image_on_canvas_height_px > 0 else 0
+
+            self.canvas.xview_moveto(max(0.0, min(1.0, fraction_x))) # Clamp fraction
+            self.canvas.yview_moveto(max(0.0, min(1.0, fraction_y))) # Clamp fraction
+        elif mouse_x_img_old is None: # Fallback for button zoom: try to restore old view fraction
+            self.canvas.xview_moveto(old_view_x_fraction)
+            self.canvas.yview_moveto(old_view_y_fraction)
 
     def _redisplay_pdf_page(self):
         if not self.pdf_doc:
@@ -964,6 +1031,6 @@ if __name__ == "__main__":
     default_font = tkFont.nametofont("TkDefaultFont")
     default_font.configure(family="Arial", size=10)
     root.option_add("*Font", default_font)
-
+ 
     app = PDFBatchApp(root)
     root.mainloop()

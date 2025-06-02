@@ -8,7 +8,8 @@
 # UI_LANGUAGE: English. All user-facing strings should be in English.
 # If a marker was being dragged, it will be handled by the marker's own bindings. # type: ignore
 # version number should be increased with each generated iteration by 0.01.
-# version 1.27
+# version 1.33
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, font as tkFont, simpledialog, ttk
 import customtkinter # Added for CustomTkinter
@@ -32,13 +33,15 @@ RESIZE_HANDLE_OFFSET = RESIZE_HANDLE_SIZE // 2
 RESIZE_HANDLE_TAG = "resize_handle"
 RESIZE_HANDLE_COLOR = "gray" # Color for handles
 RESIZE_HANDLE_ACTIVE_COLOR = "blue" # Color when mouse is over a handle
+TEXT_ALIGNMENTS = ["left", "center", "right"] # For text alignment
 DEFAULT_PDF_TEXT_COLOR = (0, 0, 0) # Black
+OPERATION_MODES = ["Text Injection", "Signature Mode"]
 
 class PDFBatchApp:
     def __init__(self, master):
         self.master = master # This will be a customtkinter.CTk() instance
         master.title("PDF Data Injector")
-        master.geometry("1600x900") # Increased height for preview
+        master.geometry("1200x900") # Increased height for preview
 
         # --- CustomTkinter Theme Settings ---
         # customtkinter.set_appearance_mode("System") # Handled in __main__
@@ -52,6 +55,7 @@ class PDFBatchApp:
         self.pdf_display_var = tk.StringVar(value="(No file selected)")
         self.excel_display_var = tk.StringVar(value="(No file selected)")
         self.output_dir_display_var = tk.StringVar(value="(No folder selected)")
+        self.include_header_row = tk.BooleanVar(value=False) # Default: Exclude header row
         self.font_family_var = tk.StringVar() 
         self.font_size_var = tk.IntVar(value=12) # Default font size
         self.excel_preview_text = tk.StringVar(value="Excel Preview: (Load Excel file)") # For internal data, not displayed directly
@@ -64,9 +68,12 @@ class PDFBatchApp:
         self.pdf_total_pages = tk.IntVar(value=0)
         self.pdf_page_display_var = tk.StringVar(value="Page: -/-")
         self.preview_row_display = tk.StringVar(value="Row: -")
+        self.operation_mode_var = tk.StringVar(value=OPERATION_MODES[0]) # Default to Text Injection
+        self.managed_columns = [] # List of dicts: {'original_excel_col_idx': int, 'display_name': str, 'unique_id': str}
         
         self.is_rtl_vars = [] # List of tk.BooleanVar for RTL status of each column
         self.col_status_vars = [] # List of tk.StringVar for V/X status of each column
+        self.col_alignment_vars = [] # List of tk.StringVar for text alignment of each column
 
         # --- Signature Mode Variables ---
         self.signature_mode_active = tk.BooleanVar(value=False)
@@ -153,6 +160,13 @@ class PDFBatchApp:
         self.theme_button = customtkinter.CTkButton(self.left_controls_panel, text="Toggle Theme", command=self._toggle_theme)
         self.theme_button.pack(fill=tk.X, padx=5, pady=(5,10))
 
+        # --- Operation Mode Selection ---
+        self.mode_selection_frame = customtkinter.CTkFrame(self.left_controls_panel)
+        self.mode_selection_frame.pack(fill=tk.X, padx=5, pady=5)
+        customtkinter.CTkLabel(self.mode_selection_frame, text="Operation Mode:").pack(side=tk.LEFT, padx=(5,5))
+        self.mode_combo = customtkinter.CTkComboBox(self.mode_selection_frame, variable=self.operation_mode_var, values=OPERATION_MODES, state="readonly", command=self._on_operation_mode_dropdown_change)
+        self.mode_combo.pack(side=tk.LEFT, padx=(0,5), expand=True, fill=tk.X)
+
         # --- PDF Selection Frame ---
         self.pdf_selection_frame = customtkinter.CTkFrame(self.left_controls_panel)
         self.pdf_selection_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -171,6 +185,11 @@ class PDFBatchApp:
         self.excel_display_entry = customtkinter.CTkEntry(self.excel_selection_frame, textvariable=self.excel_display_var, width=180, state="disabled")
         self.excel_display_entry.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
         self.excel_selection_frame.grid_columnconfigure(1, weight=1)
+
+        # Option to include/exclude header row
+        self.header_row_frame = customtkinter.CTkFrame(self.left_controls_panel)
+        # Packed/unpacked by _on_signature_mode_change
+        customtkinter.CTkCheckBox(self.header_row_frame, text="Include first row (header) in output", variable=self.include_header_row).pack(padx=5, pady=5, anchor="w")
 
         # Output Directory Selection
         self.output_dir_frame = customtkinter.CTkFrame(self.left_controls_panel)
@@ -319,6 +338,7 @@ class PDFBatchApp:
         # The column_controls_sidebar content is built by _build_dynamic_coord_controls, called by _on_signature_mode_change.
         self._on_signature_mode_change() # Call once to set initial state based on self.signature_mode_active
 
+
         # --- Pack Generate Buttons Frame (Packed last in left_controls_panel to be at the bottom) ---
         self.generate_buttons_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(10,5)) # side=tk.BOTTOM
 
@@ -353,7 +373,7 @@ class PDFBatchApp:
             # This helps ensure we're not acting on intermediate, small sizes during window creation.
             if pw_width > (master_width * 0.7) and pw_width > 800: # Heuristic: pw_width is significant
                 # Calculate sash position as 40% of the current PanedWindow width
-                sash_pos = int(pw_width * 0.30) # Changed to 30% for the left pane
+                sash_pos = int(pw_width * 0.40) # Changed to 30% for the left pane
 
                 print(f"DEBUG: Attempting sash_place. pw_width={pw_width}, master_width={master_width}, calculated sash_pos={sash_pos}")
 
@@ -471,6 +491,14 @@ class PDFBatchApp:
             customtkinter.set_appearance_mode("Light")
         self._apply_theme_colors()
 
+    def _on_operation_mode_dropdown_change(self, choice):
+        # This function is called when the ComboBox selection changes.
+        # The 'choice' argument is the new value of the ComboBox.
+        if choice == OPERATION_MODES[1]: # "Signature Mode"
+            self.signature_mode_active.set(True)
+        else: # "Text Injection"
+            self.signature_mode_active.set(False)
+        # The trace on self.signature_mode_active will call _on_signature_mode_change
     def _on_signature_mode_change(self, *args):
         is_sig_mode = self.signature_mode_active.get()
         if is_sig_mode:
@@ -479,11 +507,15 @@ class PDFBatchApp:
             self.excel_selection_frame.pack_forget()
             self.output_dir_frame.pack_forget()
             self.font_controls_frame.pack_forget()
+            self.header_row_frame.pack_forget() # Hide header option
             self.text_row_preview_frame.pack_forget()
             self.column_controls_sidebar.pack_forget() # Hide column sidebar
             self.generate_all_pdfs_button.pack_forget() # Hide batch generate
             self.generate_current_pdf_button.configure(text="Create Signed PDF", command=self.generate_signed_pdf)
             self.generate_current_pdf_button.pack(side=tk.RIGHT) # Ensure it's packed
+
+            if self.operation_mode_var.get() != OPERATION_MODES[1]: # Sync dropdown if changed by other means
+                self.operation_mode_var.set(OPERATION_MODES[1])
             
             # Ensure text-specific preview controls are hidden
             self.prev_row_button.pack_forget()
@@ -495,6 +527,7 @@ class PDFBatchApp:
             self.excel_data_preview = None
             self.coords_pdf = []
             self.num_excel_cols = 0
+            self.managed_columns.clear()
             self._update_text_preview() # Clears text preview
             self._draw_markers() # Clears markers
             self.excel_display_var.set("(N/A in Signature Mode)")
@@ -506,6 +539,7 @@ class PDFBatchApp:
             self.excel_selection_frame.pack(fill=tk.X, padx=5, pady=5)
             self.output_dir_frame.pack(fill=tk.X, padx=5, pady=5)
             self.font_controls_frame.pack(fill=tk.X, padx=5, pady=5)
+            self.header_row_frame.pack(fill=tk.X, padx=5, pady=5) # Show header option
             self.text_row_preview_frame.pack(fill=tk.X, padx=5, pady=5)
             self.column_controls_sidebar.pack(fill=tk.BOTH, expand=True, padx=5, pady=5) # Show column sidebar
             
@@ -518,6 +552,9 @@ class PDFBatchApp:
             # self.preview_row_label.pack(side=tk.LEFT, padx=2)
             # self.next_row_button.pack(side=tk.LEFT, padx=(0,5))
             # self.toggle_text_preview_button.pack(side=tk.LEFT, padx=(10,0))
+
+            if self.operation_mode_var.get() != OPERATION_MODES[0]: # Sync dropdown
+                self.operation_mode_var.set(OPERATION_MODES[0])
             
             # Clear signature data
             self.loaded_signature_pil_images = []
@@ -525,6 +562,8 @@ class PDFBatchApp:
             self.active_signature_pil_idx_to_place.set(-1)
             self.selected_placed_signature_idx.set(-1)
             self._draw_placed_signatures() # Clears signature previews
+            self.managed_columns.clear() # Clear managed columns when switching away from text mode
+            self.coords_pdf.clear()      # Clear associated coords
             if self.pdf_doc: # If PDF is loaded, ensure page nav is visible
                 self._redisplay_pdf_page() 
         self._build_dynamic_coord_controls() # Rebuild sidebar for the current mode
@@ -539,6 +578,8 @@ class PDFBatchApp:
         
         self.is_rtl_vars = []
         self.col_status_vars = []
+        # self.col_alignment_vars is re-initialized in load_excel_data or when managed_columns changes
+        self.col_alignment_vars = []
 
         if self.signature_mode_active.get():
             # --- Section 1: Load New Signature Button ---
@@ -602,30 +643,50 @@ class PDFBatchApp:
 
 
         else: # Text injection mode
-            if self.num_excel_cols == 0:
+            if not self.managed_columns: # Check if there are any managed columns (original or duplicated)
                 customtkinter.CTkLabel(self.column_controls_sidebar, text="Load Excel file\nto define text fields.", anchor="center").pack(pady=20, fill=tk.X)
                 return
 
-            for i in range(self.num_excel_cols):
+            for managed_idx, mc_data in enumerate(self.managed_columns):
+                # Ensure control variable lists are long enough. This should be handled by duplicate_managed_column.
+                # For initial build after Excel load, they are sized correctly.
+                # This is more of a safeguard or for clarity.
+                while len(self.is_rtl_vars) <= managed_idx: self.is_rtl_vars.append(tk.BooleanVar(value=True))
+                while len(self.col_alignment_vars) <= managed_idx: self.col_alignment_vars.append(tk.StringVar(value=TEXT_ALIGNMENTS[0]))
+                while len(self.col_status_vars) <= managed_idx: self.col_status_vars.append(tk.StringVar(value="✖"))
+
                 rtl_var = tk.BooleanVar(value=True) # Default to True for Hebrew context
                 rtl_var.trace_add("write", self._on_font_change) # Update preview on change
-                self.is_rtl_vars.append(rtl_var)
+                self.is_rtl_vars[managed_idx] = rtl_var # Assign to the correct index
+                
+                alignment_var = tk.StringVar(value=TEXT_ALIGNMENTS[0]) # Default to "left"
+                alignment_var.trace_add("write", self._on_font_change)
+                self.col_alignment_vars[managed_idx] = alignment_var
+
 
                 status_var = tk.StringVar(value="✖") # Default to not placed
-                if i < len(self.coords_pdf) and self.coords_pdf[i] is not None:
-                    status_var.set("✔") # Set to placed if coord exists
-                self.col_status_vars.append(status_var)
+                if managed_idx < len(self.coords_pdf) and self.coords_pdf[managed_idx] is not None and self.coords_pdf[managed_idx].get('coord') is not None:
+                    page_num_for_status = self.coords_pdf[managed_idx]['page_num']
+                    status_var.set(f"✔ (P.{page_num_for_status + 1})") # Set to placed if coord exists
+                else:
+                    status_var.set("✖")
+                self.col_status_vars[managed_idx] = status_var
 
                 item_frame = customtkinter.CTkFrame(self.column_controls_sidebar, border_width=1) # Replaces bd/relief
                 item_frame.pack(fill=tk.X, padx=5, pady=3)
 
-                status_label_text = f"Col {i+1}:"
+                status_label_text = f"{mc_data['display_name']}:" # Use display name
                 
                 customtkinter.CTkLabel(item_frame, textvariable=status_var, width=25, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(2,0)) # width in pixels
                 customtkinter.CTkLabel(item_frame, text=status_label_text).pack(side=tk.LEFT, padx=(0,5))
                 
-                customtkinter.CTkCheckBox(item_frame, text="RTL", variable=rtl_var, width=50).pack(side=tk.LEFT, padx=(0,5)) # width in pixels
-                customtkinter.CTkButton(item_frame, text="Move", command=lambda idx=i: self.prepare_to_set_coord(idx), width=50).pack(side=tk.LEFT, padx=5)
+                customtkinter.CTkCheckBox(item_frame, text="RTL", variable=rtl_var, width=45).pack(side=tk.LEFT, padx=(0,5)) # width in pixels
+                
+                align_button = customtkinter.CTkSegmentedButton(item_frame, values=TEXT_ALIGNMENTS, variable=alignment_var, width=120, height=28) # Adjusted width
+                align_button.pack(side=tk.LEFT, padx=(0,5)) # Removed expand=True
+
+                customtkinter.CTkButton(item_frame, text="Move", command=lambda mi=managed_idx: self.prepare_to_set_coord(mi), width=50).pack(side=tk.LEFT, padx=(0,2))
+                customtkinter.CTkButton(item_frame, text="Dup", command=lambda mi=managed_idx: self.duplicate_managed_column(mi), width=40).pack(side=tk.LEFT, padx=(0,5))
 
     def _handle_sidebar_select_signature(self, sig_idx):
         self._select_placed_signature(sig_idx)
@@ -654,10 +715,11 @@ class PDFBatchApp:
         except tk.TclError: # Handle cases where entry might be temporarily invalid
             pass
 
-    def prepare_to_set_coord(self, col_idx):
+    def prepare_to_set_coord(self, managed_col_idx):
         if self.pdf_doc:
-            self.active_coord_to_set_idx = col_idx
-            self.status_label.configure(text=f"Select position for column {col_idx + 1} on the image, or drag the marker.")
+            self.active_coord_to_set_idx = managed_col_idx # This is the index in self.managed_columns
+            display_name = self.managed_columns[managed_col_idx]['display_name']
+            self.status_label.configure(text=f"Select position for '{display_name}' on the image, or drag the marker.")
             self._drag_data["item"] = None
             # If text preview is active, update it to potentially clear old highlights or focus
             if self.is_text_preview_active:
@@ -665,6 +727,38 @@ class PDFBatchApp:
         else:
             self.status_label.configure(text="Please load a PDF file first.")
 
+    def duplicate_managed_column(self, managed_idx_to_duplicate):
+        if not (0 <= managed_idx_to_duplicate < len(self.managed_columns)):
+            return
+
+        original_mc_data = self.managed_columns[managed_idx_to_duplicate]
+        original_excel_idx = original_mc_data['original_excel_col_idx']
+
+        # Find existing copy count for this original_excel_idx
+        # Use the original header value (or default "Col N") for the copy name base
+        # This original_header_value is essentially original_mc_data['display_name'] if it's an original column,
+        # or the base part of it if it's already a copy.
+        # For simplicity, we'll use the display name of the item being duplicated as the base for the new copy name.
+        base_name_for_copy = original_mc_data['display_name']
+        # If base_name_for_copy already is a copy, strip the "(Copy N)" part to get the true base
+        if "(Copy " in base_name_for_copy and base_name_for_copy.endswith(")"):
+            base_name_for_copy = base_name_for_copy.rsplit(" (Copy ", 1)[0]
+
+        copy_count = 0
+        for mc in self.managed_columns:
+            if mc['original_excel_col_idx'] == original_excel_idx:
+                if "(Copy" in mc['display_name']: # A bit simplistic, assumes "(Copy N)" format
+                    copy_count +=1
+        new_display_name = f"{base_name_for_copy} (Copy {copy_count + 1})"
+        new_unique_id = f"col_{original_excel_idx}_copy_{copy_count + 1}" 
+        self.managed_columns.append({'original_excel_col_idx': original_excel_idx, 'display_name': new_display_name, 'unique_id': new_unique_id})
+        self.coords_pdf.append(None) # New placement starts as None
+        self.is_rtl_vars.append(tk.BooleanVar(value=self.is_rtl_vars[managed_idx_to_duplicate].get())) # Copy RTL
+        self.col_alignment_vars.append(tk.StringVar(value=self.col_alignment_vars[managed_idx_to_duplicate].get())) # Copy alignment
+        self.col_status_vars.append(tk.StringVar(value="✖"))
+
+        self._build_dynamic_coord_controls()
+        self.status_label.configure(text=f"'{new_display_name}' created. Use 'Move' to position it.")
     def _change_preview_row(self, direction):
         if self.excel_data_preview is None or self.excel_data_preview.empty:
             return
@@ -819,6 +913,10 @@ class PDFBatchApp:
         # Update page dimensions based on the *current* page being displayed (if they can vary)
         self.image_on_canvas_width_px = pix.width
         self.image_on_canvas_height_px = pix.height
+        
+        # CRITICAL: Update self.pdf_page_width_pt and self.pdf_page_height_pt to current page's dimensions
+        self.pdf_page_width_pt = page.rect.width
+        self.pdf_page_height_pt = page.rect.height
 
         # Get actual canvas dimensions
         canvas_actual_width = self.canvas.winfo_width()
@@ -858,25 +956,34 @@ class PDFBatchApp:
         self.canvas.delete("marker") # Delete all items with the general "marker" tag
         if self.signature_mode_active.get(): return # No text markers in signature mode
         marker_radius = 5
-        for i, pdf_coord in enumerate(self.coords_pdf):
-            if pdf_coord:
-                # Get the base canvas coordinates of the PDF point (relative to PDF image's top-left on canvas)
-                relative_canvas_coords = self._pdf_coords_to_relative_canvas_coords(pdf_coord)
-                if relative_canvas_coords:
-                    # Add the offset of the PDF image on the canvas to get absolute canvas coordinates
-                    pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
-                    
-                    abs_canvas_x = relative_canvas_coords[0] + pdf_image_x_offset
-                    abs_canvas_y = relative_canvas_coords[1] + pdf_image_y_offset
+        current_page_on_canvas = self.current_pdf_page_num.get()
 
-                    color = MARKER_COLORS[i % len(MARKER_COLORS)]
-                    marker_tag = f"marker_{i}" # Unique tag for each marker based on index
-                    self.canvas.create_rectangle(abs_canvas_x - marker_radius, abs_canvas_y - marker_radius,
-                                                 abs_canvas_x + marker_radius, abs_canvas_y + marker_radius,
-                                                 fill=color, outline=color, tags=(marker_tag, "marker")) # Add general "marker" tag too
+        # Iterate through managed_columns, as coords_pdf is indexed by managed_idx
+        for managed_idx in range(len(self.managed_columns)):
+            if managed_idx < len(self.coords_pdf): # Ensure coords_pdf has an entry for this managed_idx
+                coord_data = self.coords_pdf[managed_idx]
+                if coord_data and coord_data.get('coord') and coord_data.get('page_num') == current_page_on_canvas:
+                    pdf_coord_tuple = coord_data['coord']
+                    relative_canvas_coords = self._pdf_coords_to_relative_canvas_coords(pdf_coord_tuple)
+                    if relative_canvas_coords:
+                        pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
+                        abs_canvas_x = relative_canvas_coords[0] + pdf_image_x_offset
+                        abs_canvas_y = relative_canvas_coords[1] + pdf_image_y_offset
+
+                        # Color based on original_excel_col_idx for consistency if columns are duplicated
+                        original_excel_idx = self.managed_columns[managed_idx]['original_excel_col_idx']
+                        color = MARKER_COLORS[original_excel_idx % len(MARKER_COLORS)]
+                        
+                        marker_tag = f"marker_{managed_idx}" # Tag uses managed_idx
+                        self.canvas.create_rectangle(
+                            abs_canvas_x - marker_radius, abs_canvas_y - marker_radius,
+                            abs_canvas_x + marker_radius, abs_canvas_y + marker_radius,
+                            fill=color, outline=color, tags=(marker_tag, "marker")
+                        )
 
 
-
+    def _get_pdf_image_offset_on_canvas(self):
+        """Returns the (x, y) offset of the 'pdf_image' item on the canvas."""
     def _draw_placed_signatures(self):
         self.canvas.delete("signature_instance") # Delete all signature instances
         if not self.signature_mode_active.get() or not self.pdf_doc:
@@ -982,12 +1089,8 @@ class PDFBatchApp:
             self.current_pdf_page_num.set(0) # Start at the first page
             self.pdf_nav_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(0,2)) # Show nav controls within right_pdf_panel
 
-            if self.pdf_doc.page_count > 1:
-                self.signature_mode_active.set(True)
-            else:
-                self.signature_mode_active.set(False) # Ensure it's reset if a single page PDF is loaded later
-            
-            self._on_signature_mode_change() # Update UI based on mode
+            # Mode is now user-selected, but we still need to refresh UI elements that depend on PDF load
+            self._on_signature_mode_change() # Refresh UI based on current mode
 
             # Calculate initial zoom to fit page height
             self.master.update_idletasks() # Ensure canvas dimensions are up-to-date
@@ -1008,10 +1111,10 @@ class PDFBatchApp:
             self._redisplay_pdf_page(page_number=0) # Display first page
             
             if not self.signature_mode_active.get():
-                if self.num_excel_cols > 0:
-                    self.status_label.configure(text=f"PDF file loaded. Click 'Move' next to a column to position it, or click on the image for chronological placement.")
-                    if self.is_text_preview_active and any(c is not None for c in self.coords_pdf): # Check if any coord is set
-                        self._update_text_preview()
+                if self.num_excel_cols > 0: # Excel is loaded
+                    self.status_label.configure(text=f"PDF loaded. Click 'Move' for a field, or click PDF for next unplaced.")
+                    if self.is_text_preview_active and any(item is not None and item.get('coord') is not None for item in self.coords_pdf):
+                         self._update_text_preview()
                 else:
                     self.status_label.configure(text="PDF file loaded. Load an Excel file to define text fields.")
             # else: status already set by _on_signature_mode_change
@@ -1063,12 +1166,32 @@ class PDFBatchApp:
                 # self.excel_display_entry.configure(state="normal"); self.excel_display_entry.delete(0, tk.END); self.excel_display_entry.insert(0, error_msg); self.excel_display_entry.configure(state="disabled")
 
                 self.coords_pdf = []
+                self.managed_columns.clear()
                 return
             
-            self.num_excel_cols = df.shape[1]
-            self.coords_pdf = [None] * self.num_excel_cols # Initialize/reset coords list
+            self.num_excel_cols = df.shape[1] # Number of original Excel columns
+            
+            # Get header values from the first row for display names
+            header_values = []
+            if not df.empty and df.shape[0] > 0: # Check if there's at least one row
+                header_values = [str(df.iloc[0, i]) if pd.notna(df.iloc[0, i]) else "" for i in range(self.num_excel_cols)]
+            else: # If Excel is empty or has no rows
+                 header_values = [""] * self.num_excel_cols # Empty headers if no data rows
+
+            # Initialize managed_columns based on original Excel columns
+            self.managed_columns.clear()
+            for i in range(self.num_excel_cols):
+                display_name = header_values[i] if header_values[i] else f"Col {i+1}" # Use header or default
+                self.managed_columns.append({
+                    'original_excel_col_idx': i,
+                    'display_name': display_name,
+                    'unique_id': f"col_{i}_orig" # For potential future use
+                })
+
+            self.coords_pdf = [None] * len(self.managed_columns)
             # Initialize status vars when Excel is loaded
-            self.col_status_vars = [tk.StringVar(value="✖") for _ in range(self.num_excel_cols)]
+            self.col_status_vars = [tk.StringVar(value="✖") for _ in range(len(self.managed_columns))]
+            self.col_alignment_vars = [tk.StringVar(value=TEXT_ALIGNMENTS[0]) for _ in range(len(self.managed_columns))]
             self._build_dynamic_coord_controls() # Rebuild UI for coordinates
             
             # Improved Excel Preview
@@ -1097,15 +1220,15 @@ class PDFBatchApp:
                 preview_text_summary += "Excel file is empty."
             self.excel_preview_text.set(preview_text_summary) # Store summary, not directly displayed as a label anymore
             if self.pdf_doc:
-                 self.status_label.configure(text=f"Excel loaded ({self.num_excel_cols} cols). Click on image to position Col 1, or use 'Move'.")
+                 self.status_label.configure(text=f"Excel loaded ({len(self.managed_columns)} fields). Click PDF for next unplaced, or use 'Move'.")
             else:
-                 self.status_label.configure(text=f"Excel loaded ({self.num_excel_cols} cols). Load PDF to start positioning.")
+                 self.status_label.configure(text=f"Excel loaded ({len(self.managed_columns)} fields). Load PDF to start.")
             self.excel_data_preview = df
-            self.preview_row_index.set(0) # Reset to first row for preview
+            self.preview_row_index.set(0) 
             self._update_preview_row_display_and_buttons() # Update buttons AFTER df is set
             # Try to update preview if PDF is also loaded and at least one coord is set
-            if self.is_text_preview_active and self.pdf_doc and any(c is not None for c in self.coords_pdf):
-                self._update_text_preview()
+            if self.is_text_preview_active and self.pdf_doc and any(item is not None and item.get('coord') is not None for item in self.coords_pdf):
+                 self._update_text_preview()
         except Exception as e:
             messagebox.showerror("Error Loading Excel", str(e))
             self.excel_path.set("")
@@ -1113,6 +1236,7 @@ class PDFBatchApp:
             self.excel_display_var.set(error_msg)
             # self.excel_display_entry.configure(state="normal"); self.excel_display_entry.delete(0, tk.END); self.excel_display_entry.insert(0, error_msg); self.excel_display_entry.configure(state="disabled")
             self.excel_preview_text.set("Excel Preview: (Error loading)")
+            self.managed_columns.clear()
             self.num_excel_cols = 0
             self.preview_row_index.set(0)
             self._update_preview_row_display_and_buttons()
@@ -1376,14 +1500,20 @@ class PDFBatchApp:
         if self.active_coord_to_set_idx is not None: # User clicked "Move" button for a specific column
             idx_to_update = self.active_coord_to_set_idx
         else: # No specific column chosen, try to find the next unassigned one
-            if self.num_excel_cols > 0 and self.coords_pdf:
-                try:
-                    idx_to_update = self.coords_pdf.index(None) # Find first unassigned coordinate
-                except ValueError: # All coordinates are assigned
-                    self.status_label.configure(text="All columns positioned. Use 'Move' button or drag markers to change.")
-                    return
+            if self.managed_columns and self.coords_pdf: # Check against managed_columns
+                # Find first unassigned coordinate (where item is None or item['coord'] is None)
+                next_unassigned_idx = -1
+                for i, item_data in enumerate(self.coords_pdf): # Iterate through coords_pdf (which matches managed_columns length)
+                    if item_data is None or item_data.get('coord') is None:
+                        next_unassigned_idx = i
+                        break
+                if next_unassigned_idx != -1:
+                    idx_to_update = next_unassigned_idx
+                else: # All coordinates are assigned
+                    self.status_label.configure(text="All fields positioned. Use 'Move' or 'Dup'.")
+                    return # Exit if all are assigned and no specific "Move" was clicked
             else: # No Excel loaded or no columns
-                self.status_label.configure(text="Load Excel file to define columns for positioning.")
+                self.status_label.configure(text="Load Excel file to define fields for positioning.")
                 return
 
         if idx_to_update != -1:
@@ -1405,18 +1535,26 @@ class PDFBatchApp:
                 self.status_label.configure(text="Error calculating coordinates.")
                 return
 
-            self.coords_pdf[idx_to_update] = pdf_coords
-            if idx_to_update < len(self.col_status_vars):
-                self.col_status_vars[idx_to_update].set("✔")
+            self.coords_pdf[idx_to_update] = {
+                'page_num': self.current_pdf_page_num.get(),
+                'coord': pdf_coords
+            }
+            # Ensure col_status_vars is long enough (it should be if managed_columns is source of truth for length)
+            if idx_to_update < len(self.col_status_vars) and idx_to_update < len(self.coords_pdf) and self.coords_pdf[idx_to_update]:
+                page_num_for_status = self.coords_pdf[idx_to_update].get('page_num', -1) # Default if somehow missing
+                self.col_status_vars[idx_to_update].set(f"✔ (P.{page_num_for_status + 1})")
             
             # Check if there's a next unassigned coordinate
-            next_unassigned_idx = -1
-            try:
-                next_unassigned_idx = self.coords_pdf.index(None)
-            except ValueError: # All assigned
-                pass # next_unassigned_idx remains -1
-            status_msg = f"Column {idx_to_update + 1} positioned. "
-            self.status_label.configure(text=status_msg + (f"Click to position column {next_unassigned_idx + 1}." if next_unassigned_idx != -1 else "All columns positioned."))
+            next_unassigned_idx_for_status = -1
+            for i, item_data in enumerate(self.coords_pdf): # Re-check after update
+                if item_data is None or item_data.get('coord') is None:
+                    next_unassigned_idx_for_status = i
+                    break
+            
+            current_page_for_status = self.current_pdf_page_num.get() + 1
+            field_display_name = self.managed_columns[idx_to_update]['display_name']
+            status_msg = f"'{field_display_name}' positioned on P.{current_page_for_status}. "
+            self.status_label.configure(text=status_msg + (f"Click to position next unplaced field." if next_unassigned_idx_for_status != -1 else "All fields positioned."))
             self.active_coord_to_set_idx = None # Reset specific "Move" selection after any click
             
             self._draw_markers() 
@@ -1476,15 +1614,18 @@ class PDFBatchApp:
         item_id = item[0]
         tags = self.canvas.gettags(item_id)
 
-        col_idx = -1
+        # col_idx here refers to managed_idx
+        managed_idx_pressed = -1
         for tag in tags:
             if tag.startswith("marker_"):
                 try:
-                    col_idx = int(tag.split("_")[1])
+                    managed_idx_pressed = int(tag.split("_")[1])
                     break
                 except ValueError:
                     continue
-        if col_idx == -1: return # Not a marker we are interested in
+        if managed_idx_pressed == -1:
+             return # Not a marker we are interested in
+        col_idx = managed_idx_pressed # Use clearer variable name
         
         self._drag_data["item"] = item_id # This is the canvas item_id of the marker
         self._drag_data["col_idx"] = col_idx
@@ -1494,6 +1635,7 @@ class PDFBatchApp:
         self._item_drag_active = True # Signal that an item drag has started
 
     def on_marker_motion(self, event):
+        # print(f"DEBUG MARKER MOTION: drag_data={self._drag_data}")
         if not self._drag_data["item"]:
             return # No item being dragged
 
@@ -1516,14 +1658,18 @@ class PDFBatchApp:
         
         pdf_coords = self._canvas_coords_to_pdf_coords(new_canvas_center_x, new_canvas_center_y)
 
-        current_col_idx = self._drag_data.get("col_idx")
-        if pdf_coords and current_col_idx is not None and 0 <= current_col_idx < len(self.coords_pdf):
-            self.coords_pdf[current_col_idx] = pdf_coords
-            # self.coord_texts[current_col_idx].set(f"מיקום {current_col_idx+1}: ({pdf_coords[0]:.1f}, {pdf_coords[1]:.1f}) נק'")
-            
+        # current_col_idx is managed_idx
+        current_managed_idx = self._drag_data.get("col_idx")
+        if pdf_coords and current_managed_idx is not None and 0 <= current_managed_idx < len(self.coords_pdf):
+            # Preserve page_num, update only coord
+            if self.coords_pdf[current_managed_idx] is not None: # Should exist if dragging
+                self.coords_pdf[current_managed_idx]['coord'] = pdf_coords
+            else: # Should not happen, but as a safeguard, re-initialize with current page
+                self.coords_pdf[current_managed_idx] = {'page_num': self.current_pdf_page_num.get(), 'coord': pdf_coords}
             if self.is_text_preview_active:
                 self._update_text_preview()
-        
+        # No need to update col_status_vars here, page number doesn't change on drag
+
         return "break" # Consume event to prevent canvas pan while dragging marker
 
     def on_marker_release(self, event):
@@ -1536,20 +1682,25 @@ class PDFBatchApp:
         new_canvas_center_y = (marker_coords_canvas[1] + marker_coords_canvas[3]) / 2
         pdf_coords = self._canvas_coords_to_pdf_coords(new_canvas_center_x, new_canvas_center_y)
 
-        current_col_idx = self._drag_data.get("col_idx")
-        if pdf_coords and current_col_idx is not None and 0 <= current_col_idx < len(self.coords_pdf):
-            self.coords_pdf[current_col_idx] = pdf_coords
-            # self.coord_texts[current_col_idx].set(f"מיקום {current_col_idx+1}: ({pdf_coords[0]:.1f}, {pdf_coords[1]:.1f}) נק'")
-            if current_col_idx < len(self.col_status_vars):
-                 self.col_status_vars[current_col_idx].set("✔")
-            self.status_label.configure(text=f"Column {current_col_idx + 1} position updated by dragging.")
+        current_managed_idx = self._drag_data.get("col_idx")
+        if pdf_coords and current_managed_idx is not None and 0 <= current_managed_idx < len(self.coords_pdf):
+            if self.coords_pdf[current_managed_idx] is not None:
+                self.coords_pdf[current_managed_idx]['coord'] = pdf_coords
+                page_num_for_status = self.coords_pdf[current_managed_idx]['page_num']
+                if current_managed_idx < len(self.col_status_vars):
+                    self.col_status_vars[current_managed_idx].set(f"✔ (P.{page_num_for_status + 1})")
+                field_display_name_drag = self.managed_columns[current_managed_idx]['display_name']
+                self.status_label.configure(text=f"'{field_display_name_drag}' position updated on P.{page_num_for_status + 1}.")
+            else: # Should not happen
+                self.coords_pdf[current_managed_idx] = {'page_num': self.current_pdf_page_num.get(), 'coord': pdf_coords}
+                # ... update status var and label ...
 
         self._drag_data["item"] = None
         self._drag_data["col_idx"] = None
         self._item_drag_active = False # Signal that item drag has ended
         
         if self.is_text_preview_active: # Ensure preview updates on drag release
-            self._update_text_preview()
+            self._update_text_preview() # Will iterate through all placements
 
     def on_marker_double_click(self, event):
         item = self.canvas.find_withtag(tk.CURRENT) # Get item under cursor
@@ -1558,20 +1709,22 @@ class PDFBatchApp:
         item_id = item[0]
         tags = self.canvas.gettags(item_id)
 
-        col_idx = -1
+        managed_idx_dc = -1
         for tag in tags:
             if tag.startswith("marker_"):
                 try:
-                    col_idx = int(tag.split("_")[1])
+                    managed_idx_dc = int(tag.split("_")[1])
                     break
                 except ValueError:
                     continue
         
-        if col_idx != -1 and 0 <= col_idx < len(self.is_rtl_vars): # Check if col_idx is valid for is_rtl_vars
-            current_rtl_var = self.is_rtl_vars[col_idx] # Get the BooleanVar for this column
-            current_rtl_var.set(not current_rtl_var.get()) # Toggle the boolean variable
+        if managed_idx_dc != -1 and 0 <= managed_idx_dc < len(self.is_rtl_vars): # Check if managed_idx_dc is valid
+            current_rtl_var = self.is_rtl_vars[managed_idx_dc] # Get the BooleanVar for this managed column
+            current_rtl_var.set(not current_rtl_var.get())
             # The trace on is_rtl_vars will call _on_font_change, which updates the preview.
-            self.status_label.configure(text=f"Column {col_idx + 1} direction changed to {'RTL' if current_rtl_var.get() else 'LTR'}.")
+            field_display_name_dc = self.managed_columns[managed_idx_dc]['display_name']
+            self.status_label.configure(text=f"'{field_display_name_dc}' direction changed to {'RTL' if current_rtl_var.get() else 'LTR'}.")
+
 
     def on_placed_signature_press(self, event):
         # current_tags = self.canvas.gettags(tk.CURRENT) # Debug
@@ -1761,9 +1914,9 @@ class PDFBatchApp:
             return # Or toggle a different kind of preview if relevant for signatures
         
         # Check if at least one coordinate is set for the existing columns
-        if not self.coords_pdf or not any(c is not None for c in self.coords_pdf):
-            if self.num_excel_cols > 0:
-                messagebox.showwarning("Warning", f"Please select a position for at least one column on the PDF first.")
+        if not self.coords_pdf or not any(item is not None and item.get('coord') is not None for item in self.coords_pdf):
+            if self.managed_columns: # Check if any fields are defined
+                messagebox.showwarning("Warning", f"Please select a position for at least one field on the PDF first.")
             else: # Should not happen if Excel is loaded, but as a safeguard
                 messagebox.showwarning("Warning", "Please define text fields (load Excel) and select positions.")
             return
@@ -1774,7 +1927,7 @@ class PDFBatchApp:
         
         # Then update button text and preview based on the new state
         # (Button text update for Show/Hide can be added here if desired)
-        self._update_text_preview()
+        self._update_text_preview() # Will iterate through all placements
 
     def _update_text_preview(self):
         # Clear existing preview text items
@@ -1784,9 +1937,10 @@ class PDFBatchApp:
         if not self.is_text_preview_active or \
            self.signature_mode_active.get() or \
            not self.pdf_doc or (self.excel_data_preview is None or self.excel_data_preview.empty) or \
-           not self.coords_pdf or self.num_excel_cols == 0:
+           not self.coords_pdf or not self.managed_columns: # Check against managed_columns
             return
 
+        current_page_on_canvas = self.current_pdf_page_num.get()
         current_row_idx = self.preview_row_index.get()
         if not (self.excel_data_preview is not None and \
                 0 <= current_row_idx < self.excel_data_preview.shape[0]):
@@ -1809,54 +1963,77 @@ class PDFBatchApp:
                 current_tk_font = tkFont.Font(family="Arial", size=max(1, int(font_size_from_input * current_zoom))) # Fallback uses unscaled base
                 # Consider applying TKINTER_FONT_SCALE_FACTOR to fallback as well for consistency:
                 # current_tk_font = tkFont.Font(family="Arial", size=preview_font_size)
-            for i in range(self.num_excel_cols):
-                if i < len(self.coords_pdf) and self.coords_pdf[i] and \
-                   i < len(self.is_rtl_vars) and i < self.excel_data_preview.shape[1]:
+            for managed_idx in range(len(self.managed_columns)):
+                if not (managed_idx < len(self.coords_pdf) and \
+                        managed_idx < len(self.is_rtl_vars) and \
+                        managed_idx < len(self.col_alignment_vars)):
+                    continue # Should not happen if lists are synced
+
+                coord_data_item = self.coords_pdf[managed_idx]
+                original_excel_col_idx = self.managed_columns[managed_idx]['original_excel_col_idx']
+
+                if coord_data_item and coord_data_item.get('coord') and \
+                   coord_data_item.get('page_num') == current_page_on_canvas and \
+                   original_excel_col_idx < self.excel_data_preview.shape[1]: # Check against original Excel columns
                     
-                    val_preview = str(self.excel_data_preview.iloc[current_row_idx, i]) if pd.notna(self.excel_data_preview.iloc[current_row_idx, i]) else ""
-                    # For Tkinter canvas preview, pass the logical string.
+                    val_preview = str(self.excel_data_preview.iloc[current_row_idx, original_excel_col_idx]) if pd.notna(self.excel_data_preview.iloc[current_row_idx, original_excel_col_idx]) else ""
                     text_for_preview = val_preview 
                     
-                    pdf_coord = self.coords_pdf[i]
-                    is_rtl_current = self.is_rtl_vars[i].get()
+                    pdf_coord_tuple = coord_data_item['coord']
+                    is_rtl_current = self.is_rtl_vars[managed_idx].get()
+
                 else:
                     continue # Skip if data for this column is incomplete
 
+                current_alignment = TEXT_ALIGNMENTS[0] # Default to left
+                current_alignment = self.col_alignment_vars[managed_idx].get()
+
                 # Get relative canvas coordinates for the text
-                relative_canvas_coords = self._pdf_coords_to_relative_canvas_coords(pdf_coord)
-                pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
-                canvas_coords = (relative_canvas_coords[0] + pdf_image_x_offset, 
-                                 relative_canvas_coords[1] + pdf_image_y_offset)
-                if canvas_coords:
-                    anchor_val = tk.SE if is_rtl_current else tk.SW
+                relative_canvas_coords = self._pdf_coords_to_relative_canvas_coords(pdf_coord_tuple)
+                if relative_canvas_coords: # Check if conversion was successful
+                    pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
+                    canvas_coords = (relative_canvas_coords[0] + pdf_image_x_offset, 
+                                     relative_canvas_coords[1] + pdf_image_y_offset)
+                
+                    if current_alignment == "left":
+                        anchor_val = tk.SW
+                    elif current_alignment == "center":
+                        anchor_val = tk.S
+                    else: # right
+                        anchor_val = tk.SE
                     if current_tk_font:
                         item_id = self.canvas.create_text(canvas_coords[0], canvas_coords[1], text=text_for_preview,
                                                          font=current_tk_font, anchor=anchor_val, fill="purple", tags="preview_text_item")
                         self.preview_text_items.append(item_id)
                     else:
-                        # Should not happen if fallback is in place
                         print("Error: No font object available for preview.")
+                            
         except Exception as e:
             print(f"Error updating text preview: {e}") # Log error, don't crash
 
-    def _insert_text_on_pdf_page(self, page, text_value, pdf_coord_tuple, font_family_name, font_file_path, font_size_pt, is_rtl, fitz_font_object):
+    def _insert_text_on_pdf_page(self, page, text_value, pdf_coord_tuple, font_family_name, font_file_path, font_size_pt, is_rtl, alignment, fitz_font_object):
         """Helper function to insert text onto a PDF page."""
         if pdf_coord_tuple is None:
             return
 
-        bidi_val = get_display(text_value, base_dir='R' if is_rtl else 'L')
-        text_width_pt = fitz_font_object.text_length(bidi_val, fontsize=font_size_pt)
+        text_to_render = get_display(text_value, base_dir='R' if is_rtl else 'L')
+        text_width_pt = fitz_font_object.text_length(text_to_render, fontsize=font_size_pt)
 
-        insertion_point_x_pt = pdf_coord_tuple[0]
+        ref_x_pt = pdf_coord_tuple[0]
         # PyMuPDF's insert_text uses y from top of page.
         # self.coords_pdf stores y from bottom of page.
-        insertion_point_y_pt = (self.pdf_page_height_pt - pdf_coord_tuple[1]) - Y_OFFSET_PDF_OUTPUT
+        insertion_point_y_pt = (page.rect.height - pdf_coord_tuple[1]) - Y_OFFSET_PDF_OUTPUT
 
-        if is_rtl:
-            insertion_point_x_pt -= text_width_pt
+        # Calculate final X based on alignment
+        if alignment == "left":
+            final_x_pt = ref_x_pt
+        elif alignment == "center":
+            final_x_pt = ref_x_pt - (text_width_pt / 2)
+        else: # "right"
+            final_x_pt = ref_x_pt - text_width_pt
 
-        page.insert_text((insertion_point_x_pt, insertion_point_y_pt),
-                           bidi_val,
+        page.insert_text((final_x_pt, insertion_point_y_pt),
+                           text_to_render,
                            fontname=font_family_name,
                            fontfile=font_file_path,
                            fontsize=font_size_pt,
@@ -1871,14 +2048,19 @@ class PDFBatchApp:
             messagebox.showerror("Error", "Please ensure PDF template, Excel file, and Output folder are selected.")
             return
 
-        if not self.coords_pdf or not all(c is not None for c in self.coords_pdf):
+        # Check if all defined columns have coordinates
+        all_coords_set = True
+        # Check if all *managed* columns have placements
+        if self.managed_columns and (not self.coords_pdf or not all(item is not None and item.get('coord') is not None for item in self.coords_pdf)):
+            all_coords_set = False # This checks if every entry in coords_pdf (corresponding to a managed_column) is set.
+        if not all_coords_set:
             messagebox.showerror("Error", "Please select positions for all text columns defined from Excel.")
             return
 
         try:
             df = pd.read_excel(self.excel_path.get(), header=None)
             if df.shape[1] != self.num_excel_cols: # Consistency check
-                messagebox.showerror("Error", "The number of columns in the Excel file has changed since initial load. Please reload.")
+                messagebox.showerror("Error", "The number of original columns in the Excel file has changed. Please reload.")
                 return
 
             font_family_selected = self.font_family_var.get()
@@ -1909,29 +2091,41 @@ class PDFBatchApp:
             self.master.update_idletasks() # Update GUI
             
             num_files_generated = 0 # Initialize counter for generated files
-            for index, row in df.iterrows():
+            # Iterate over rows, skipping the first row if include_header_row is false
+            for index, row in df.iterrows():                
                 doc_copy = fitz.open(self.pdf_path.get())
-                page_to_modify = doc_copy.load_page(0) # Text injection still targets first page only as per original design
+                # page_to_modify will be determined per column based on stored page_num
 
-                for i in range(self.num_excel_cols):
-                    if i >= row.size or i >= len(self.coords_pdf) or self.coords_pdf[i] is None or i >= len(self.is_rtl_vars):
+                for managed_idx in range(len(self.managed_columns)):
+                    if not (managed_idx < len(self.coords_pdf) and \
+                            managed_idx < len(self.is_rtl_vars) and \
+                            managed_idx < len(self.col_alignment_vars)):
+                        continue # Should not happen
+
+                    original_excel_col_idx = self.managed_columns[managed_idx]['original_excel_col_idx']
+                    coord_data_output = self.coords_pdf[managed_idx]
+
+                    # Skip if this row is the header row and we are excluding it
+                    if not self.include_header_row.get() and index == 0:
+                         continue
+                    if original_excel_col_idx >= row.size or not coord_data_output or not coord_data_output.get('coord'): # Check if column exists in row data and coord is set
                         continue # Skip if data for this column is missing or not configured
 
-                    val = str(row.iloc[i]) if pd.notna(row.iloc[i]) else ""
-                    is_rtl_output = self.is_rtl_vars[i].get()
-                    current_coord_pdf = self.coords_pdf[i]
+                    val = str(row.iloc[original_excel_col_idx]) if pd.notna(row.iloc[original_excel_col_idx]) else ""
+                    alignment_output = self.col_alignment_vars[managed_idx].get()
+                    is_rtl_output = self.is_rtl_vars[managed_idx].get()
+                    
+                    page_num_to_modify = coord_data_output['page_num']
+                    pdf_coord_to_insert = coord_data_output['coord']
+                    page_object_to_modify = doc_copy.load_page(page_num_to_modify)
 
-                    self._insert_text_on_pdf_page(page_to_modify,
-                                                  val,
-                                                  current_coord_pdf,
-                                                  font_family_selected,
-                                                  font_path,
-                                                  font_size,
-                                                  is_rtl_output,
-                                                  fitz_font)
+                    self._insert_text_on_pdf_page(page_object_to_modify,
+                                                  val, pdf_coord_to_insert,
+                                                  font_family_selected, font_path, font_size,
+                                                  is_rtl_output, alignment_output, fitz_font)
 
                 output_filename = os.path.join(self.output_dir.get(), f"output_pdf_{index + 1}.pdf")
-                doc_copy.save(output_filename)
+                doc_copy.save(output_filename, garbage=4, deflate=True) # Add save options
                 doc_copy.close()
                 num_files_generated += 1
 
@@ -1956,13 +2150,21 @@ class PDFBatchApp:
         if not self.output_dir.get(): # Need an output dir for the save dialog's initial dir
             messagebox.showerror("Error", "Please select an output folder first (to save the current file).")
             return
-        if not self.coords_pdf or not all(c is not None for c in self.coords_pdf):
+        all_coords_set_single = True # Check against all managed columns
+        if self.managed_columns and (not self.coords_pdf or not all(item is not None and item.get('coord') is not None for item in self.coords_pdf)):
+            all_coords_set_single = False
+        if not all_coords_set_single:
             messagebox.showerror("Error", "Please select positions for all text columns defined from Excel.")
             return
 
         current_row_idx = self.preview_row_index.get()
         if not (0 <= current_row_idx < self.excel_data_preview.shape[0]):
             messagebox.showerror("Error", "Invalid row selected for preview.")
+            return
+        
+        # Prevent generating PDF for header row if it's excluded
+        if not self.include_header_row.get() and current_row_idx == 0:
+            messagebox.showwarning("Preview PDF Generation", "Header row is excluded from output. PDF for this row will not be generated.")
             return
 
         font_family_selected = self.font_family_var.get()
@@ -1997,26 +2199,36 @@ class PDFBatchApp:
             self.master.update_idletasks()
 
             row_data = self.excel_data_preview.iloc[current_row_idx]
-            
             doc_copy = fitz.open(self.pdf_path.get())
-            page_to_modify = doc_copy.load_page(0) # Text injection still targets first page only
+            # page_to_modify will be determined per column
 
-            for i in range(self.num_excel_cols):
-                if i >= row_data.size or i >= len(self.coords_pdf) or self.coords_pdf[i] is None or i >= len(self.is_rtl_vars):
+            for managed_idx in range(len(self.managed_columns)):
+                if not (managed_idx < len(self.coords_pdf) and \
+                        managed_idx < len(self.is_rtl_vars) and \
+                        managed_idx < len(self.col_alignment_vars)):
                     continue
 
-                val = str(row_data.iloc[i]) if pd.notna(row_data.iloc[i]) else ""
-                is_rtl_output = self.is_rtl_vars[i].get()
-                current_coord_pdf = self.coords_pdf[i]
+                original_excel_col_idx = self.managed_columns[managed_idx]['original_excel_col_idx']
+                coord_data_single = self.coords_pdf[managed_idx]
 
-                self._insert_text_on_pdf_page(page_to_modify,
-                                              val,
-                                              current_coord_pdf,
-                                              font_family_selected,
-                                              font_path,
-                                              font_size,
-                                              is_rtl_output,
-                                              fitz_font)
+                # This check is technically redundant due to the one at the start of the function for current_row_idx == 0
+                # but kept for safety if logic changes.
+                # if not self.include_header_row.get() and current_row_idx == 0: continue
+                if original_excel_col_idx >= row_data.size or not coord_data_single or not coord_data_single.get('coord'): # Check if column exists in row data and coord is set
+                    continue
+
+                val = str(row_data.iloc[original_excel_col_idx]) if pd.notna(row_data.iloc[original_excel_col_idx]) else ""
+                is_rtl_output = self.is_rtl_vars[managed_idx].get()
+                alignment_output = self.col_alignment_vars[managed_idx].get()
+                
+                page_num_to_modify_single = coord_data_single['page_num']
+                pdf_coord_to_insert_single = coord_data_single['coord']
+                page_object_to_modify_single = doc_copy.load_page(page_num_to_modify_single)
+
+                self._insert_text_on_pdf_page(page_object_to_modify_single,
+                                              val, pdf_coord_to_insert_single,
+                                              font_family_selected, font_path, font_size,
+                                              is_rtl_output, alignment_output, fitz_font)
 
             doc_copy.save(output_filepath)
             doc_copy.close()

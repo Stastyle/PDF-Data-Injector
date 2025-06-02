@@ -8,7 +8,7 @@
 # UI_LANGUAGE: English. All user-facing strings should be in English.
 # If a marker was being dragged, it will be handled by the marker's own bindings. # type: ignore
 # version number should be increased with each generated iteration by 0.01.
-# version 1.33
+# version 1.40
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, font as tkFont, simpledialog, ttk
@@ -41,7 +41,7 @@ class PDFBatchApp:
     def __init__(self, master):
         self.master = master # This will be a customtkinter.CTk() instance
         master.title("PDF Data Injector")
-        master.geometry("1200x900") # Increased height for preview
+        master.geometry("1300x900") # Increased height for preview
 
         # --- CustomTkinter Theme Settings ---
         # customtkinter.set_appearance_mode("System") # Handled in __main__
@@ -57,7 +57,7 @@ class PDFBatchApp:
         self.output_dir_display_var = tk.StringVar(value="(No folder selected)")
         self.include_header_row = tk.BooleanVar(value=False) # Default: Exclude header row
         self.font_family_var = tk.StringVar() 
-        self.font_size_var = tk.IntVar(value=12) # Default font size
+        # self.font_size_var = tk.IntVar(value=12) # Default font size - Will be per-column now
         self.excel_preview_text = tk.StringVar(value="Excel Preview: (Load Excel file)") # For internal data, not displayed directly
         self.current_zoom_factor = tk.DoubleVar(value=1.0)
         self.zoom_display_var = tk.StringVar(value="Zoom: 100%")
@@ -74,6 +74,7 @@ class PDFBatchApp:
         self.is_rtl_vars = [] # List of tk.BooleanVar for RTL status of each column
         self.col_status_vars = [] # List of tk.StringVar for V/X status of each column
         self.col_alignment_vars = [] # List of tk.StringVar for text alignment of each column
+        self.col_font_size_vars = [] # List of tk.IntVar for font size of each managed column
 
         # --- Signature Mode Variables ---
         self.signature_mode_active = tk.BooleanVar(value=False)
@@ -217,11 +218,12 @@ class PDFBatchApp:
         self.font_combo.pack(side=tk.LEFT, padx=(5,2), pady=2)
 
         customtkinter.CTkLabel(font_details_subframe, text="Size:").pack(side=tk.LEFT, padx=(10, 2), pady=2)
-        self.font_size_entry = customtkinter.CTkEntry(font_details_subframe, textvariable=self.font_size_var, width=40)
-        self.font_size_entry.pack(side=tk.LEFT, padx=(0,2), pady=2)
-
-        customtkinter.CTkButton(font_details_subframe, text="-", command=lambda: self._adjust_font_size(-1), width=25).pack(side=tk.LEFT, padx=(0,2), pady=2)
-        customtkinter.CTkButton(font_details_subframe, text="+", command=lambda: self._adjust_font_size(1), width=25).pack(side=tk.LEFT, padx=(0,5), pady=2)
+        # Global font size entry and buttons are removed. Will be per-column.
+        # self.font_size_entry = customtkinter.CTkEntry(font_details_subframe, textvariable=self.font_size_var, width=40)
+        # self.font_size_entry.pack(side=tk.LEFT, padx=(0,2), pady=2)
+        # customtkinter.CTkButton(font_details_subframe, text="-", command=lambda: self._adjust_font_size(-1), width=25).pack(side=tk.LEFT, padx=(0,2), pady=2)
+        # customtkinter.CTkButton(font_details_subframe, text="+", command=lambda: self._adjust_font_size(1), width=25).pack(side=tk.LEFT, padx=(0,5), pady=2)
+        customtkinter.CTkLabel(font_details_subframe, text="(Per-field size below)").pack(side=tk.LEFT, padx=(5,0))
 
         # --- Zoom Controls ---
         self.zoom_frame = customtkinter.CTkFrame(self.left_controls_panel)
@@ -382,17 +384,19 @@ class PDFBatchApp:
                 # For paneconfigure, we calculate target_left_width and ensure it and the remainder meet minsizes.
                 target_left_width = sash_pos # sash_pos is already calculated as pw_width * 0.40
                 remaining_width_for_right = pw_width - target_left_width
-
                 if target_left_width >= 280 and remaining_width_for_right >= 400:
-                    self.paned_window.paneconfigure(self.left_pane_content_frame, width=target_left_width) # Pass the widget instance
+                    # Revert to using paneconfigure, as sash_place might have issues
+                    self.paned_window.paneconfigure(self.left_pane_content_frame, width=target_left_width)
+                    self.paned_window.update_idletasks() # Ensure change is processed
+
                     self.initial_sash_set_flag = True
                     
                     # Check actual sash position after setting
-                    actual_sash_coord = self.paned_window.sash_coord(0)
-                    print(f"DEBUG: Paneconfigure applied. PaneW: {pw_width}, Target Left Width: {target_left_width}, Actual Sash Coord: {actual_sash_coord}. Unbinding.")
+                    actual_sash_coord = self.paned_window.sash_coord(0) # (x, y) of the sash
+                    print(f"DEBUG: Sash position attempt. PaneW: {pw_width}, Target Left Width: {target_left_width}, Actual Sash Coord: {actual_sash_coord}. Unbinding.")
                     self.paned_window.unbind("<Configure>") # Unbind only after successful, satisfactory setting
                 else:
-                    print(f"DEBUG: Calculated target_left_width {target_left_width} or remaining_width {remaining_width_for_right} (from pw_width {pw_width}) does not meet minsize constraints (L:280, R:400). Deferring.")
+                    print(f"DEBUG: Sash target {target_left_width} or remaining {remaining_width_for_right} (from pw_width {pw_width}) fails minsize. Deferring.")
             else:
                 print(f"DEBUG: PaneW {pw_width} (MasterW {master_width}) not yet sufficient for primary condition. Deferring sash set.")
         except tk.TclError as e:
@@ -569,7 +573,7 @@ class PDFBatchApp:
         self._build_dynamic_coord_controls() # Rebuild sidebar for the current mode
     def _bind_variables(self): # Renamed
         self.font_family_var.trace_add("write", self._on_font_change)
-        self.font_size_var.trace_add("write", self._on_font_change)
+        # self.font_size_var.trace_add("write", self._on_font_change) # Removed as font size is now per-column
 
     def _build_dynamic_coord_controls(self):
         # Clear existing controls
@@ -579,6 +583,7 @@ class PDFBatchApp:
         self.is_rtl_vars = []
         self.col_status_vars = []
         # self.col_alignment_vars is re-initialized in load_excel_data or when managed_columns changes
+        self.col_font_size_vars = []
         self.col_alignment_vars = []
 
         if self.signature_mode_active.get():
@@ -654,6 +659,7 @@ class PDFBatchApp:
                 while len(self.is_rtl_vars) <= managed_idx: self.is_rtl_vars.append(tk.BooleanVar(value=True))
                 while len(self.col_alignment_vars) <= managed_idx: self.col_alignment_vars.append(tk.StringVar(value=TEXT_ALIGNMENTS[0]))
                 while len(self.col_status_vars) <= managed_idx: self.col_status_vars.append(tk.StringVar(value="✖"))
+                while len(self.col_font_size_vars) <= managed_idx: self.col_font_size_vars.append(tk.IntVar(value=12)) # Default font size
 
                 rtl_var = tk.BooleanVar(value=True) # Default to True for Hebrew context
                 rtl_var.trace_add("write", self._on_font_change) # Update preview on change
@@ -662,6 +668,10 @@ class PDFBatchApp:
                 alignment_var = tk.StringVar(value=TEXT_ALIGNMENTS[0]) # Default to "left"
                 alignment_var.trace_add("write", self._on_font_change)
                 self.col_alignment_vars[managed_idx] = alignment_var
+                
+                font_size_var = tk.IntVar(value=self.managed_columns[managed_idx].get('font_size', 12)) # Get from managed_columns or default
+                font_size_var.trace_add("write", self._on_font_change)
+                self.col_font_size_vars[managed_idx] = font_size_var
 
 
                 status_var = tk.StringVar(value="✖") # Default to not placed
@@ -675,18 +685,30 @@ class PDFBatchApp:
                 item_frame = customtkinter.CTkFrame(self.column_controls_sidebar, border_width=1) # Replaces bd/relief
                 item_frame.pack(fill=tk.X, padx=5, pady=3)
 
-                status_label_text = f"{mc_data['display_name']}:" # Use display name
-                
-                customtkinter.CTkLabel(item_frame, textvariable=status_var, width=25, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(2,0)) # width in pixels
-                customtkinter.CTkLabel(item_frame, text=status_label_text).pack(side=tk.LEFT, padx=(0,5))
-                
-                customtkinter.CTkCheckBox(item_frame, text="RTL", variable=rtl_var, width=45).pack(side=tk.LEFT, padx=(0,5)) # width in pixels
-                
-                align_button = customtkinter.CTkSegmentedButton(item_frame, values=TEXT_ALIGNMENTS, variable=alignment_var, width=120, height=28) # Adjusted width
-                align_button.pack(side=tk.LEFT, padx=(0,5)) # Removed expand=True
+                # Frame for left-aligned items (Status and Name)
+                left_aligned_frame = customtkinter.CTkFrame(item_frame, fg_color="transparent")
+                left_aligned_frame.pack(side=tk.LEFT, padx=(0,5), fill=tk.X, expand=True) # Allow this to expand to push right frame
 
-                customtkinter.CTkButton(item_frame, text="Move", command=lambda mi=managed_idx: self.prepare_to_set_coord(mi), width=50).pack(side=tk.LEFT, padx=(0,2))
-                customtkinter.CTkButton(item_frame, text="Dup", command=lambda mi=managed_idx: self.duplicate_managed_column(mi), width=40).pack(side=tk.LEFT, padx=(0,5))
+                customtkinter.CTkLabel(left_aligned_frame, textvariable=status_var, width=25, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(2,0))
+                name_label = customtkinter.CTkLabel(left_aligned_frame, text=f"{mc_data['display_name']}:", anchor="w")
+                # Let name_label fill available space in the left_aligned_frame
+                name_label.pack(side=tk.LEFT, padx=(0,5), fill=tk.X, expand=True)
+
+                # Frame for right-aligned items (all other controls)
+                right_aligned_frame = customtkinter.CTkFrame(item_frame, fg_color="transparent")
+                right_aligned_frame.pack(side=tk.RIGHT, padx=(5,0))
+
+                # Pack controls into right_aligned_frame, from left to right for their internal order
+                customtkinter.CTkCheckBox(right_aligned_frame, text="RTL", variable=rtl_var, width=45).pack(side=tk.LEFT, padx=(0,3))
+                align_button = customtkinter.CTkSegmentedButton(right_aligned_frame, values=TEXT_ALIGNMENTS, variable=alignment_var, width=90, height=28) # Further reduced width
+                align_button.pack(side=tk.LEFT, padx=(0,3))
+                customtkinter.CTkLabel(right_aligned_frame, text="Size:").pack(side=tk.LEFT, padx=(3,1)) # Abbreviated "Size"
+                customtkinter.CTkEntry(right_aligned_frame, textvariable=font_size_var, width=28).pack(side=tk.LEFT, padx=(0,1)) # Reduced width
+                customtkinter.CTkButton(right_aligned_frame, text="-", command=lambda mi=managed_idx: self._adjust_specific_font_size(mi, -1), width=16).pack(side=tk.LEFT, padx=(0,1)) # Reduced width
+                customtkinter.CTkButton(right_aligned_frame, text="+", command=lambda mi=managed_idx: self._adjust_specific_font_size(mi, 1), width=16).pack(side=tk.LEFT, padx=(0,3)) # Reduced width
+                customtkinter.CTkButton(right_aligned_frame, text="Move", command=lambda mi=managed_idx: self.prepare_to_set_coord(mi), width=40).pack(side=tk.LEFT, padx=(0,2)) # Reduced width
+                customtkinter.CTkButton(right_aligned_frame, text="Dup", command=lambda mi=managed_idx: self.duplicate_managed_column(mi), width=35).pack(side=tk.LEFT, padx=(0,2)) # Reduced width
+
 
     def _handle_sidebar_select_signature(self, sig_idx):
         self._select_placed_signature(sig_idx)
@@ -705,13 +727,15 @@ class PDFBatchApp:
         if self.is_text_preview_active and not self.signature_mode_active.get():
             self._update_text_preview()
 
-    def _adjust_font_size(self, delta):
+    def _adjust_specific_font_size(self, managed_idx, delta):
+        if not (0 <= managed_idx < len(self.col_font_size_vars)):
+            return
         try:
-            current_size = self.font_size_var.get()
+            current_size = self.col_font_size_vars[managed_idx].get()
             new_size = current_size + delta
             if new_size >= 1: # Ensure font size is at least 1
-                self.font_size_var.set(new_size)
-            # The trace on font_size_var will call _on_font_change
+                self.col_font_size_vars[managed_idx].set(new_size)
+                self.managed_columns[managed_idx]['font_size'] = new_size # Update stored value
         except tk.TclError: # Handle cases where entry might be temporarily invalid
             pass
 
@@ -751,11 +775,13 @@ class PDFBatchApp:
                     copy_count +=1
         new_display_name = f"{base_name_for_copy} (Copy {copy_count + 1})"
         new_unique_id = f"col_{original_excel_idx}_copy_{copy_count + 1}" 
-        self.managed_columns.append({'original_excel_col_idx': original_excel_idx, 'display_name': new_display_name, 'unique_id': new_unique_id})
+        copied_font_size = self.col_font_size_vars[managed_idx_to_duplicate].get()
+        self.managed_columns.append({'original_excel_col_idx': original_excel_idx, 'display_name': new_display_name, 'unique_id': new_unique_id, 'font_size': copied_font_size})
         self.coords_pdf.append(None) # New placement starts as None
         self.is_rtl_vars.append(tk.BooleanVar(value=self.is_rtl_vars[managed_idx_to_duplicate].get())) # Copy RTL
         self.col_alignment_vars.append(tk.StringVar(value=self.col_alignment_vars[managed_idx_to_duplicate].get())) # Copy alignment
         self.col_status_vars.append(tk.StringVar(value="✖"))
+        self.col_font_size_vars.append(tk.IntVar(value=copied_font_size)) # Copy font size
 
         self._build_dynamic_coord_controls()
         self.status_label.configure(text=f"'{new_display_name}' created. Use 'Move' to position it.")
@@ -1185,12 +1211,13 @@ class PDFBatchApp:
                 self.managed_columns.append({
                     'original_excel_col_idx': i,
                     'display_name': display_name,
-                    'unique_id': f"col_{i}_orig" # For potential future use
+                    'unique_id': f"col_{i}_orig", 
+                    'font_size': 12 # Default font size for new columns
                 })
 
             self.coords_pdf = [None] * len(self.managed_columns)
             # Initialize status vars when Excel is loaded
-            self.col_status_vars = [tk.StringVar(value="✖") for _ in range(len(self.managed_columns))]
+            self.col_status_vars = [tk.StringVar(value="✖") for _ in range(len(self.managed_columns))] # Already done in _build_dynamic_coord_controls
             self.col_alignment_vars = [tk.StringVar(value=TEXT_ALIGNMENTS[0]) for _ in range(len(self.managed_columns))]
             self._build_dynamic_coord_controls() # Rebuild UI for coordinates
             
@@ -1305,27 +1332,23 @@ class PDFBatchApp:
         return (pdf_x_pt, pdf_y_pt_from_bottom)
 
     def _on_canvas_b1_press(self, event):
-        # Check if the click is on an existing marker.
-        # The marker's own tag binding (on_marker_press) will handle the drag initiation.
         current_item_tuple = self.canvas.find_withtag(tk.CURRENT)
         if current_item_tuple:
-            # If it's a signature, let its specific handler take over
             item_id = current_item_tuple[0]
             tags = self.canvas.gettags(item_id)
-            if "signature_instance" in tags:
-                # on_placed_signature_press will be called by its tag_bind.
-                # Return "break" to prevent canvas's default B1 press (like scan_mark).
-                return "break" 
-            if "marker" in tags:
-                # Let on_marker_press (already bound to the marker tag) handle this.
-                # on_marker_press will set self._drag_data["item"].
-                # Return "break" to prevent canvas's default B1 press.
+            # If a resize handle, signature, or marker is pressed, their specific handlers
+            # (_on_resize_handle_press, on_placed_signature_press, on_marker_press)
+            # will be called due to their tag bindings and should manage _item_drag_active.
+            # This general handler should just yield to them by breaking early.
+            if RESIZE_HANDLE_TAG in tags or "signature_instance" in tags or "marker" in tags:
+                # print(f"DEBUG: _on_canvas_b1_press: Clicked on interactive item with tags {tags}. Returning break.")
                 return "break"
 
-        # If not on a draggable item, this B1 press is for the canvas itself (pan or click-to-place).
+        # If we reach here, the click was on the canvas background, not an interactive item.
+        # Proceed with canvas pan or click-to-place logic.
         if not self.pdf_doc:
             self.status_label.configure(text="Please load a PDF file first.")
-            return
+            return "break" # Still break if no PDF, to prevent errors
 
         # Store press coordinates and prepare for potential pan
         self._pan_data["press_x"] = self.canvas.canvasx(event.x) # Use canvas coords
@@ -1333,6 +1356,7 @@ class PDFBatchApp:
         self._pan_data["is_potential_pan_or_click"] = True
         self._pan_data["has_dragged_for_pan"] = False
         self.canvas.scan_mark(event.x, event.y) # For scan_dragto, event.x/y is fine
+        # No "break" here for canvas background click, allow event to propagate if needed by Tkinter's default mechanisms.
 
     def _on_canvas_b1_motion(self, event):
         # print(f"DEBUG: _on_canvas_b1_motion entered. _drag_data: {self._drag_data}, _pan_data: {self._pan_data}") # Reduced verbosity
@@ -1413,13 +1437,12 @@ class PDFBatchApp:
 
         # Then check for other item drags (like signature move or marker move)
         elif self._item_drag_active: 
-            # An item (marker or signature image) is being dragged.
-            # Its specific <B1-Motion> tag binding (e.g., on_placed_signature_motion, on_marker_motion)
-            # should handle this. This general canvas motion handler should let the event propagate
-            # to those more specific handlers if they exist and are designed to take over.
-            # If those handlers consume the event (return "break"), this part won't matter.
-            pass 
-        
+            # If an item drag (marker or signature move) is active,
+            # this general canvas motion handler should cede control entirely
+            # to the tag-specific motion handlers (e.g., on_marker_motion).
+            # Returning "break" ensures that canvas panning logic below is not executed
+            # and that the event is consumed, preventing default canvas behaviors.
+            return "break"
         # If no resize and no other item drag, then it's for canvas panning.
         else:
             # No item drag is active, so this motion is for canvas panning.
@@ -1626,13 +1649,18 @@ class PDFBatchApp:
         if managed_idx_pressed == -1:
              return # Not a marker we are interested in
         col_idx = managed_idx_pressed # Use clearer variable name
-        
+
         self._drag_data["item"] = item_id # This is the canvas item_id of the marker
         self._drag_data["col_idx"] = col_idx
         self._drag_data["x"] = self.canvas.canvasx(event.x)
         self._drag_data["y"] = self.canvas.canvasy(event.y)
         self.active_coord_to_set_idx = None # Cancel click-to-set mode
         self._item_drag_active = True # Signal that an item drag has started
+
+        # Find all items belonging to this marker group (text and rectangle)
+        specific_tag_for_group = f"marker_{managed_idx_pressed}"
+        items_in_group = self.canvas.find_withtag(specific_tag_for_group)
+        self._drag_data["items_to_move_together"] = list(items_in_group)
 
     def on_marker_motion(self, event):
         # print(f"DEBUG MARKER MOTION: drag_data={self._drag_data}")
@@ -1645,31 +1673,48 @@ class PDFBatchApp:
         dx = current_x - self._drag_data["x"]
         dy = current_y - self._drag_data["y"]
 
-        self.canvas.move(self._drag_data["item"], dx, dy)
-
+        # Move all items in the group
+        items_to_move = self._drag_data.get("items_to_move_together")
+        if items_to_move:
+            for item_id_in_group in items_to_move:
+                self.canvas.move(item_id_in_group, dx, dy)
+        else: # Fallback if items_to_move_together was not set (should not happen)
+            self.canvas.move(self._drag_data["item"], dx, dy)
+            
         self._drag_data["x"] = current_x
         self._drag_data["y"] = current_y
 
         # Update PDF coordinates
-        marker_coords_canvas = self.canvas.coords(self._drag_data["item"]) # x1, y1, x2, y2
-        # Center of the oval marker
-        new_canvas_center_x = (marker_coords_canvas[0] + marker_coords_canvas[2]) / 2
-        new_canvas_center_y = (marker_coords_canvas[1] + marker_coords_canvas[3]) / 2
-        
-        pdf_coords = self._canvas_coords_to_pdf_coords(new_canvas_center_x, new_canvas_center_y)
+        # Get the canvas coordinates of the dragged item's reference point
+        item_id_dragged = self._drag_data["item"]
+        marker_coords_canvas = self.canvas.coords(item_id_dragged)
+        item_type = self.canvas.type(item_id_dragged)
+
+        new_canvas_ref_x, new_canvas_ref_y = 0, 0
+        if item_type == "text":
+            # For text, coords are [x, y] of the anchor point
+            new_canvas_ref_x = marker_coords_canvas[0]
+            new_canvas_ref_y = marker_coords_canvas[1]
+        elif item_type == "rectangle":
+            # For rectangle, calculate center
+            new_canvas_ref_x = (marker_coords_canvas[0] + marker_coords_canvas[2]) / 2
+            new_canvas_ref_y = (marker_coords_canvas[1] + marker_coords_canvas[3]) / 2
+        else:
+            print(f"Warning: Dragged 'marker' item is of unexpected type: {item_type}")
+            return "break"
+
+        pdf_coords = self._canvas_coords_to_pdf_coords(new_canvas_ref_x, new_canvas_ref_y)
 
         # current_col_idx is managed_idx
         current_managed_idx = self._drag_data.get("col_idx")
         if pdf_coords and current_managed_idx is not None and 0 <= current_managed_idx < len(self.coords_pdf):
-            # Preserve page_num, update only coord
             if self.coords_pdf[current_managed_idx] is not None: # Should exist if dragging
                 self.coords_pdf[current_managed_idx]['coord'] = pdf_coords
             else: # Should not happen, but as a safeguard, re-initialize with current page
                 self.coords_pdf[current_managed_idx] = {'page_num': self.current_pdf_page_num.get(), 'coord': pdf_coords}
-            if self.is_text_preview_active:
-                self._update_text_preview()
-        # No need to update col_status_vars here, page number doesn't change on drag
-
+            # DO NOT call self._update_text_preview() here. It will be called on release.
+            # The text item is moved directly by self.canvas.move().
+            
         return "break" # Consume event to prevent canvas pan while dragging marker
 
     def on_marker_release(self, event):
@@ -1677,10 +1722,24 @@ class PDFBatchApp:
             return
         # Final update after drag, ensuring the latest position is used
         # This is mostly redundant if on_marker_motion updates correctly, but good for safety
-        marker_coords_canvas = self.canvas.coords(self._drag_data["item"])
-        new_canvas_center_x = (marker_coords_canvas[0] + marker_coords_canvas[2]) / 2
-        new_canvas_center_y = (marker_coords_canvas[1] + marker_coords_canvas[3]) / 2
-        pdf_coords = self._canvas_coords_to_pdf_coords(new_canvas_center_x, new_canvas_center_y)
+        item_id_released = self._drag_data["item"]
+        marker_coords_canvas = self.canvas.coords(item_id_released)
+        item_type = self.canvas.type(item_id_released)
+
+        new_canvas_ref_x, new_canvas_ref_y = 0, 0
+        if item_type == "text":
+            new_canvas_ref_x = marker_coords_canvas[0]
+            new_canvas_ref_y = marker_coords_canvas[1]
+        elif item_type == "rectangle":
+            new_canvas_ref_x = (marker_coords_canvas[0] + marker_coords_canvas[2]) / 2
+            new_canvas_ref_y = (marker_coords_canvas[1] + marker_coords_canvas[3]) / 2
+        else:
+            # This case should ideally not be reached if press/motion handled it.
+            print(f"Warning: Released 'marker' item is of unexpected type: {item_type}")
+            self._drag_data.clear()
+            self._item_drag_active = False
+            return "break"
+        pdf_coords = self._canvas_coords_to_pdf_coords(new_canvas_ref_x, new_canvas_ref_y)
 
         current_managed_idx = self._drag_data.get("col_idx")
         if pdf_coords and current_managed_idx is not None and 0 <= current_managed_idx < len(self.coords_pdf):
@@ -1698,6 +1757,7 @@ class PDFBatchApp:
         self._drag_data["item"] = None
         self._drag_data["col_idx"] = None
         self._item_drag_active = False # Signal that item drag has ended
+        self._drag_data.pop("items_to_move_together", None) # Clean up
         
         if self.is_text_preview_active: # Ensure preview updates on drag release
             self._update_text_preview() # Will iterate through all placements
@@ -1948,29 +2008,30 @@ class PDFBatchApp:
             return # Invalid row index for preview
         try:
             font_family = self.font_family_var.get()
-            font_size_from_input = self.font_size_var.get()
-            if font_size_from_input <= 0: return # Invalid font size
+            font_family_to_use = font_family
 
-            # Adjust base font size for Tkinter preview if it tends to look larger, then scale with zoom
-            current_zoom = self.current_zoom_factor.get()
-            adjusted_base_preview_size = font_size_from_input * TKINTER_FONT_SCALE_FACTOR
-            preview_font_size = max(1, int(adjusted_base_preview_size * current_zoom))
-
+            # Validate font_family_to_use once by trying to create a dummy font object.
             try:
-                current_tk_font = tkFont.Font(family=font_family, size=preview_font_size)
-            except tk.TclError as e: # Fallback if Tkinter can't create the font by name
-                print(f"Error loading font '{font_family}' for Tkinter preview: {e}. Falling back to Arial.")
-                current_tk_font = tkFont.Font(family="Arial", size=max(1, int(font_size_from_input * current_zoom))) # Fallback uses unscaled base
-                # Consider applying TKINTER_FONT_SCALE_FACTOR to fallback as well for consistency:
-                # current_tk_font = tkFont.Font(family="Arial", size=preview_font_size)
+                tkFont.Font(family=font_family_to_use, size=1) # Test creation with a dummy size
+            except tk.TclError:
+                print(f"Warning: Font family '{font_family_to_use}' not valid for Tkinter. Falling back to Arial.")
+                font_family_to_use = "Arial"
+
             for managed_idx in range(len(self.managed_columns)):
                 if not (managed_idx < len(self.coords_pdf) and \
                         managed_idx < len(self.is_rtl_vars) and \
-                        managed_idx < len(self.col_alignment_vars)):
+                        managed_idx < len(self.col_alignment_vars) and \
+                        managed_idx < len(self.col_font_size_vars)):
                     continue # Should not happen if lists are synced
 
                 coord_data_item = self.coords_pdf[managed_idx]
                 original_excel_col_idx = self.managed_columns[managed_idx]['original_excel_col_idx']
+                
+                # Get per-field font size
+                field_font_size_pt = self.col_font_size_vars[managed_idx].get()
+                if field_font_size_pt <= 0: continue
+                current_zoom = self.current_zoom_factor.get()
+                tkinter_preview_font_size_px = max(1, int(field_font_size_pt * TKINTER_FONT_SCALE_FACTOR * current_zoom))
 
                 if coord_data_item and coord_data_item.get('coord') and \
                    coord_data_item.get('page_num') == current_page_on_canvas and \
@@ -2001,12 +2062,15 @@ class PDFBatchApp:
                         anchor_val = tk.S
                     else: # right
                         anchor_val = tk.SE
-                    if current_tk_font:
+                    try:
+                        # Configure the font object with the specific size for this field
+                        specific_marker_tag = f"marker_{managed_idx}"
+                        field_specific_font = tkFont.Font(family=font_family_to_use, size=tkinter_preview_font_size_px)
                         item_id = self.canvas.create_text(canvas_coords[0], canvas_coords[1], text=text_for_preview,
-                                                         font=current_tk_font, anchor=anchor_val, fill="purple", tags="preview_text_item")
+                                                         font=field_specific_font, anchor=anchor_val, fill="purple", tags=("preview_text_item", specific_marker_tag, "marker"))
                         self.preview_text_items.append(item_id)
-                    else:
-                        print("Error: No font object available for preview.")
+                    except tk.TclError as font_error:
+                        print(f"Error creating Tkinter font '{font_family_to_use}' size {tkinter_preview_font_size_px} for preview: {font_error}")
                             
         except Exception as e:
             print(f"Error updating text preview: {e}") # Log error, don't crash
@@ -2064,13 +2128,9 @@ class PDFBatchApp:
                 return
 
             font_family_selected = self.font_family_var.get()
-            font_size = self.font_size_var.get()
-
-            if not font_family_selected:
-                messagebox.showerror("Error", "Please select a font family.")
-                return
-            if font_size <= 0:
-                messagebox.showerror("Error", "Font size must be positive.")
+            # Global font_size removed. Will be per-column.
+            if not font_family_selected: # Still need a global font family
+                messagebox.showerror("Error", "Please select a global font family.")
                 return
 
             try:
@@ -2082,10 +2142,11 @@ class PDFBatchApp:
 
             # Load font once for metrics and use in insert_text
             try:
-                fitz_font = fitz.Font(fontname=font_family_selected, fontfile=font_path)
+                # This fitz_font object is for getting text_length.
+                # The actual font size will be passed to insert_text per field.
+                fitz_font_for_metrics = fitz.Font(fontname=font_family_selected, fontfile=font_path)
             except Exception as e:
                 messagebox.showerror("Font Load Error", f"Could not load the font '{font_family_selected}' from path '{font_path}'.\n{e}")
-                return
 
             self.status_label.configure(text="Processing files...")
             self.master.update_idletasks() # Update GUI
@@ -2099,10 +2160,12 @@ class PDFBatchApp:
                 for managed_idx in range(len(self.managed_columns)):
                     if not (managed_idx < len(self.coords_pdf) and \
                             managed_idx < len(self.is_rtl_vars) and \
-                            managed_idx < len(self.col_alignment_vars)):
+                            managed_idx < len(self.col_alignment_vars) and \
+                            managed_idx < len(self.col_font_size_vars)):
                         continue # Should not happen
 
                     original_excel_col_idx = self.managed_columns[managed_idx]['original_excel_col_idx']
+                    field_font_size_pt = self.col_font_size_vars[managed_idx].get()
                     coord_data_output = self.coords_pdf[managed_idx]
 
                     # Skip if this row is the header row and we are excluding it
@@ -2121,10 +2184,10 @@ class PDFBatchApp:
 
                     self._insert_text_on_pdf_page(page_object_to_modify,
                                                   val, pdf_coord_to_insert,
-                                                  font_family_selected, font_path, font_size,
-                                                  is_rtl_output, alignment_output, fitz_font)
+                                                  font_family_selected, font_path, field_font_size_pt,
+                                                  is_rtl_output, alignment_output, fitz_font_for_metrics)
 
-                output_filename = os.path.join(self.output_dir.get(), f"output_pdf_{index + 1}.pdf")
+                output_filename = os.path.join(self.output_dir.get(), f"output_pdf_{index + 1 - (0 if self.include_header_row.get() else 1)}.pdf")
                 doc_copy.save(output_filename, garbage=4, deflate=True) # Add save options
                 doc_copy.close()
                 num_files_generated += 1
@@ -2168,20 +2231,19 @@ class PDFBatchApp:
             return
 
         font_family_selected = self.font_family_var.get()
-        font_size = self.font_size_var.get()
-
-        if not font_family_selected:
-            messagebox.showerror("Error", "Please select a font family.")
-            return
-        if font_size <= 0:
-            messagebox.showerror("Error", "Font size must be positive.")
+        # Global font_size removed.
+        if not font_family_selected: # Still need a global font family
+            messagebox.showerror("Error", "Please select a global font family.")
             return
 
         try:
             font_path = fm.findfont(font_family_selected)
-            fitz_font = fitz.Font(fontname=font_family_selected, fontfile=font_path)
+            # This fitz_font object is for getting text_length.
+            # The actual font size will be passed to insert_text per field.
+            fitz_font_for_metrics = fitz.Font(fontname=font_family_selected, fontfile=font_path)
         except Exception as e:
             messagebox.showerror("Font Error", f"Could not load the font '{font_family_selected}'.\n{e}")
+
             return
 
         output_filepath = filedialog.asksaveasfilename(
@@ -2205,10 +2267,12 @@ class PDFBatchApp:
             for managed_idx in range(len(self.managed_columns)):
                 if not (managed_idx < len(self.coords_pdf) and \
                         managed_idx < len(self.is_rtl_vars) and \
-                        managed_idx < len(self.col_alignment_vars)):
+                        managed_idx < len(self.col_alignment_vars) and \
+                        managed_idx < len(self.col_font_size_vars)):
                     continue
 
                 original_excel_col_idx = self.managed_columns[managed_idx]['original_excel_col_idx']
+                field_font_size_pt = self.col_font_size_vars[managed_idx].get()
                 coord_data_single = self.coords_pdf[managed_idx]
 
                 # This check is technically redundant due to the one at the start of the function for current_row_idx == 0
@@ -2227,10 +2291,10 @@ class PDFBatchApp:
 
                 self._insert_text_on_pdf_page(page_object_to_modify_single,
                                               val, pdf_coord_to_insert_single,
-                                              font_family_selected, font_path, font_size,
-                                              is_rtl_output, alignment_output, fitz_font)
+                                              font_family_selected, font_path, field_font_size_pt,
+                                              is_rtl_output, alignment_output, fitz_font_for_metrics)
 
-            doc_copy.save(output_filepath)
+            doc_copy.save(output_filepath, garbage=4, deflate=True)
             doc_copy.close()
             self.status_label.configure(text=f"current PDF saved to: {output_filepath}")
             messagebox.showinfo("Success", f"current PDF saved successfully!")

@@ -6,9 +6,9 @@
 # It also provides a preview of the PDF with the injected data.
 # and _on_canvas_b1_motion.
 # UI_LANGUAGE: English. All user-facing strings should be in English.
-# If a marker was being dragged, it will be handled by the marker's own bindings.
+# If a marker was being dragged, it will be handled by the marker's own bindings. # type: ignore
 # version number should be increased with each generated iteration by 0.01.
-# version 1.23
+# version 1.27
 import tkinter as tk
 from tkinter import filedialog, messagebox, font as tkFont, simpledialog, ttk
 import customtkinter # Added for CustomTkinter
@@ -114,7 +114,7 @@ class PDFBatchApp:
             "aspect_ratio": 1.0
         }
         self._zoom_debounce_timer = None
-        self._DEBOUNCE_TIME_MS = 75 # Milliseconds to wait before applying zoom (increased from 50)
+        self._DEBOUNCE_TIME_MS = 10 # Milliseconds to wait before applying zoom (reduced from 75 for responsiveness)
 
         # --- GUI Layout ---
         # Main application frame
@@ -122,24 +122,7 @@ class PDFBatchApp:
         self.main_app_frame.pack(fill=tk.BOTH, expand=True)
 
         # --- Create PanedWindow for resizable left/right panels ---
-        sash_color = "gray75" # Default sash color
-        try: # Attempt to get a more theme-appropriate color
-            current_theme = customtkinter.ThemeManager.theme
-            appearance_mode = customtkinter.get_appearance_mode() # "Light" or "Dark"
-            if "CTkFrame" in current_theme and "border_color" in current_theme["CTkFrame"]:
-                theme_border_color = current_theme["CTkFrame"]["border_color"]
-                if isinstance(theme_border_color, tuple) and len(theme_border_color) == 2:
-                    # If it's a tuple (light_color, dark_color)
-                    sash_color = theme_border_color[1] if appearance_mode == "Dark" else theme_border_color[0]
-                elif isinstance(theme_border_color, str):
-                    sash_color = theme_border_color # If it's already a string
-            # Fallback if theme color not found or not in expected format
-            elif appearance_mode == "Dark":
-                sash_color = "gray40" # Darker theme, lighter sash
-            else:
-                sash_color = "gray75" # Lighter theme, darker sash (or default)
-        except Exception:
-            pass # Use default if theme access fails
+        sash_color = self._get_paned_window_sash_color() # Initial sash color
 
         self.paned_window = tk.PanedWindow(
             self.main_app_frame,
@@ -346,6 +329,9 @@ class PDFBatchApp:
         # Schedule setting the initial sash position after the window is mapped
         self.initial_sash_set_flag = False # Flag to ensure sash is set only once
         self.paned_window.bind("<Configure>", self._set_initial_sash_position_on_configure)
+
+        # Apply initial theme colors to panels and canvas
+        self._apply_theme_colors()
         # self.master.after(150, self._set_initial_sash_position) # Old method
 
     def _set_initial_sash_position_on_configure(self, event=None):
@@ -395,12 +381,95 @@ class PDFBatchApp:
         except Exception as e: # Catch other potential errors, e.g. if master.winfo_width() is not ready early on
             print(f"Unexpected error in _set_initial_sash_position_on_configure: {e}")
 
+    def _get_paned_window_sash_color(self):
+        sash_color = "gray75"  # Default sash color
+        try:
+            current_theme_settings = customtkinter.ThemeManager.theme
+            appearance_mode = customtkinter.get_appearance_mode()  # "Light" or "Dark"
+            if "CTkFrame" in current_theme_settings and "border_color" in current_theme_settings["CTkFrame"]:
+                theme_border_color = current_theme_settings["CTkFrame"]["border_color"]
+                if isinstance(theme_border_color, tuple) and len(theme_border_color) == 2:
+                    sash_color = theme_border_color[1] if appearance_mode == "Dark" else theme_border_color[0]
+                elif isinstance(theme_border_color, str):
+                    sash_color = theme_border_color
+            elif appearance_mode == "Dark":
+                sash_color = "gray40"
+            else: # Light
+                sash_color = "gray75"
+        except Exception:
+            pass  # Use default if theme access fails
+        return sash_color
+
+    def _update_paned_window_sash_color(self):
+        sash_color = self._get_paned_window_sash_color()
+        self.paned_window.configure(bg=sash_color)
+
+    def _apply_theme_colors(self):
+        current_mode = customtkinter.get_appearance_mode()
+        
+        # Get the fg_color definition for CTkFrame from the theme
+        # Expected: tuple/list (light_color, dark_color) or a single color string.
+        # Problematic case observed: a single string "light_color dark_color"
+        theme_fg_color_setting = customtkinter.ThemeManager.theme["CTkFrame"]["fg_color"]
+
+        actual_light_color = None
+        actual_dark_color = None
+
+        if isinstance(theme_fg_color_setting, (tuple, list)) and len(theme_fg_color_setting) == 2:
+            actual_light_color = str(theme_fg_color_setting[0])
+            actual_dark_color = str(theme_fg_color_setting[1])
+        elif isinstance(theme_fg_color_setting, str):
+            parts = theme_fg_color_setting.split()
+            if len(parts) == 2: # Attempt to parse "light_color dark_color" string
+                print(f"Warning: CTkFrame fg_color from theme is a single string with two parts: '{theme_fg_color_setting}'. Parsing as light='{parts[0]}', dark='{parts[1]}'.")
+                actual_light_color = parts[0]
+                actual_dark_color = parts[1]
+            elif len(parts) == 1: # Single valid color string
+                actual_light_color = theme_fg_color_setting
+                actual_dark_color = theme_fg_color_setting
+            # else: parts is empty or > 2, will be handled by fallbacks
+        
+        # Fallbacks if parsing failed or colors are still invalid (e.g. contain spaces)
+        # Use CTk's default frame colors as a safe fallback.
+        # Example: customtkinter.ThemeManager.theme["CTk"]["fg_color"] is often ["gray92", "gray14"]
+        default_theme_colors = customtkinter.ThemeManager.theme.get("CTk", {}).get("fg_color")
+        if not (isinstance(default_theme_colors, (list, tuple)) and len(default_theme_colors) == 2):
+            default_theme_colors = ["gray92", "gray14"] # Absolute fallback
+
+        safe_light_fallback = str(default_theme_colors[0])
+        safe_dark_fallback = str(default_theme_colors[1])
+
+        if not actual_light_color or not isinstance(actual_light_color, str) or ' ' in actual_light_color:
+            print(f"Warning: Parsed light color '{actual_light_color}' is invalid. Using fallback: {safe_light_fallback}")
+            actual_light_color = safe_light_fallback
+        if not actual_dark_color or not isinstance(actual_dark_color, str) or ' ' in actual_dark_color:
+            print(f"Warning: Parsed dark color '{actual_dark_color}' is invalid. Using fallback: {safe_dark_fallback}")
+            actual_dark_color = safe_dark_fallback
+            
+        # Assign panel and canvas colors based on the reliably parsed single color strings
+        panel_bg_color_to_set = None
+        canvas_bg_color_to_set = None
+
+        if current_mode == "Dark":
+            panel_bg_color_to_set = actual_dark_color
+            canvas_bg_color_to_set = actual_dark_color # Canvas matches panel in dark mode
+        else:  # Light Mode
+            panel_bg_color_to_set = actual_light_color
+            canvas_bg_color_to_set = "lightgrey" # Canvas is lightgrey in light mode as per original design
+
+        self.right_pdf_panel.configure(fg_color=panel_bg_color_to_set)
+        self.canvas_container.configure(fg_color=panel_bg_color_to_set) 
+        self.canvas.configure(bg=canvas_bg_color_to_set)
+
+        self._update_paned_window_sash_color()
+
     def _toggle_theme(self):
         current_mode = customtkinter.get_appearance_mode()
         if current_mode == "Light":
             customtkinter.set_appearance_mode("Dark")
         else:
             customtkinter.set_appearance_mode("Light")
+        self._apply_theme_colors()
 
     def _on_signature_mode_change(self, *args):
         is_sig_mode = self.signature_mode_active.get()

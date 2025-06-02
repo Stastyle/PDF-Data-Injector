@@ -1,6 +1,6 @@
 ## PDFDataInjector.py
 # A Tkinter application to inject data from an Excel file into a PDF template.
-# It allows users to select a PDF template, an Excel data file, and an output directory,
+# It allows users to select a PDF template, an Excel data file, and an output directory, # type: ignore
 # and dynamically place text fields on the PDF based on the Excel data.
 # The application supports zooming, panning, and RTL text handling for Hebrew text.
 # It also provides a preview of the PDF with the injected data.
@@ -8,14 +8,14 @@
 # UI_LANGUAGE: English. All user-facing strings should be in English.
 # If a marker was being dragged, it will be handled by the marker's own bindings.
 # version number should be increased with each generated iteration by 0.01.
-# version 1.22
-
+# version 1.23
 import tkinter as tk
 from tkinter import filedialog, messagebox, font as tkFont, simpledialog, ttk
+import customtkinter # Added for CustomTkinter
 import pandas as pd
 import fitz  # PyMuPDF
 import os
-import arabic_reshaper
+# import arabic_reshaper # Not directly used in the provided snippet, but kept if used by get_display
 from bidi.algorithm import get_display
 import matplotlib.font_manager as fm # Added for finding font file paths
 from PIL import Image, ImageTk # For signature image handling
@@ -36,9 +36,13 @@ DEFAULT_PDF_TEXT_COLOR = (0, 0, 0) # Black
 
 class PDFBatchApp:
     def __init__(self, master):
-        self.master = master
+        self.master = master # This will be a customtkinter.CTk() instance
         master.title("PDF Data Injector")
-        master.geometry("950x800") # Increased height for preview
+        master.geometry("1600x900") # Increased height for preview
+
+        # --- CustomTkinter Theme Settings ---
+        # customtkinter.set_appearance_mode("System") # Handled in __main__
+        # customtkinter.set_default_color_theme("blue") # Handled in __main__
 
         # --- Variables ---
         self.pdf_path = tk.StringVar()
@@ -49,7 +53,7 @@ class PDFBatchApp:
         self.excel_display_var = tk.StringVar(value="(No file selected)")
         self.output_dir_display_var = tk.StringVar(value="(No folder selected)")
         self.font_family_var = tk.StringVar() 
-        self.font_size_var = tk.IntVar(value=12)     # Default font size
+        self.font_size_var = tk.IntVar(value=12) # Default font size
         self.excel_preview_text = tk.StringVar(value="Excel Preview: (Load Excel file)") # For internal data, not displayed directly
         self.current_zoom_factor = tk.DoubleVar(value=1.0)
         self.zoom_display_var = tk.StringVar(value="Zoom: 100%")
@@ -102,131 +106,187 @@ class PDFBatchApp:
         self._resize_data = {
             "active": False,
             "sig_idx": -1,
-            "handle_type": None, # e.g., "tl", "tr", "br", "bl"
+            "handle_type": None, # e.g., "tl", "tr", "br", "bl"משה
             "start_mouse_x_canvas": 0, # Canvas coords
             "start_mouse_y_canvas": 0, # Canvas coords
             "original_pdf_rect": None, # fitz.Rect of the signature at drag start (PDF points, y from top)
             "canvas_item_id_sig": None, 
             "aspect_ratio": 1.0
         }
+        self._zoom_debounce_timer = None
+        self._DEBOUNCE_TIME_MS = 75 # Milliseconds to wait before applying zoom (increased from 50)
 
         # --- GUI Layout ---
         # Main application frame
-        main_app_frame = tk.Frame(master)
-        main_app_frame.pack(fill=tk.BOTH, expand=True)
-        self.main_app_frame = main_app_frame # Store for later use if needed
+        self.main_app_frame = customtkinter.CTkFrame(master, corner_radius=0)
+        self.main_app_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Frame for file selection and controls
-        controls_frame = tk.Frame(main_app_frame, padx=10, pady=10)
-        controls_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+        # --- Create PanedWindow for resizable left/right panels ---
+        sash_color = "gray75" # Default sash color
+        try: # Attempt to get a more theme-appropriate color
+            current_theme = customtkinter.ThemeManager.theme
+            appearance_mode = customtkinter.get_appearance_mode() # "Light" or "Dark"
+            if "CTkFrame" in current_theme and "border_color" in current_theme["CTkFrame"]:
+                theme_border_color = current_theme["CTkFrame"]["border_color"]
+                if isinstance(theme_border_color, tuple) and len(theme_border_color) == 2:
+                    # If it's a tuple (light_color, dark_color)
+                    sash_color = theme_border_color[1] if appearance_mode == "Dark" else theme_border_color[0]
+                elif isinstance(theme_border_color, str):
+                    sash_color = theme_border_color # If it's already a string
+            # Fallback if theme color not found or not in expected format
+            elif appearance_mode == "Dark":
+                sash_color = "gray40" # Darker theme, lighter sash
+            else:
+                sash_color = "gray75" # Lighter theme, darker sash (or default)
+        except Exception:
+            pass # Use default if theme access fails
 
-        # Content area for canvas and sidebar
-        content_area_frame = tk.Frame(main_app_frame)
-        content_area_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(0,5))
+        self.paned_window = tk.PanedWindow(
+            self.main_app_frame,
+            orient=tk.HORIZONTAL,
+            sashwidth=6,          # Width of the sash
+            sashrelief=tk.FLAT,   # Relief of the sash
+            bd=0,                 # Borderwidth for the PanedWindow itself
+            bg=sash_color,        # Background color of the sash
+            opaqueresize=True     # Resize content during drag
+        )
+        self.paned_window.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Create intermediate frames for the PanedWindow
+        self.left_pane_content_frame = customtkinter.CTkFrame(self.paned_window, fg_color="transparent")
+        self.right_pane_content_frame = customtkinter.CTkFrame(self.paned_window, fg_color="transparent")
+
+        # Left panel for all controls (potentially scrollable)
+        # Now a child of the intermediate left_pane_content_frame
+        self.left_controls_panel = customtkinter.CTkScrollableFrame(self.left_pane_content_frame) 
+        self.left_controls_panel.pack(fill=tk.BOTH, expand=True)
+
+        # Right panel for PDF display
+        self.right_pdf_panel = customtkinter.CTkFrame(self.right_pane_content_frame, fg_color="transparent")
+        self.right_pdf_panel.pack(fill=tk.BOTH, expand=True)
+
+
+        # --- Theme Toggle Button ---
+        self.theme_button = customtkinter.CTkButton(self.left_controls_panel, text="Toggle Theme", command=self._toggle_theme)
+        self.theme_button.pack(fill=tk.X, padx=5, pady=(5,10))
+
+        # --- PDF Selection Frame ---
+        self.pdf_selection_frame = customtkinter.CTkFrame(self.left_controls_panel)
+        self.pdf_selection_frame.pack(fill=tk.X, padx=5, pady=5)
+        customtkinter.CTkLabel(self.pdf_selection_frame, text="PDF Template:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        customtkinter.CTkButton(self.pdf_selection_frame, text="Select PDF", command=self.load_pdf_template, width=100).grid(row=1, column=0, padx=5, pady=2, sticky="ew")
+        self.pdf_display_entry = customtkinter.CTkEntry(self.pdf_selection_frame, textvariable=self.pdf_display_var, width=180, state="disabled")
+        self.pdf_display_entry.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
+        self.pdf_selection_frame.grid_columnconfigure(1, weight=1) # Allow entry to expand
 
         # --- Text Injection Controls (will be hidden in signature mode) ---
-        # PDF Selection
-        tk.Label(controls_frame, text="PDF Template:").grid(row=0, column=0, sticky="e", padx=5, pady=2)
-        tk.Button(controls_frame, text="Select PDF", command=self.load_pdf_template, width=12).grid(row=0, column=1, padx=5, pady=2, sticky="e")
-        tk.Entry(controls_frame, textvariable=self.pdf_display_var, width=40, state="readonly").grid(row=0, column=2, padx=5, pady=2, sticky="ew")
-
         # Excel Selection
-        tk.Label(controls_frame, text="Excel Data File:").grid(row=1, column=0, sticky="e", padx=5, pady=2)
-        tk.Button(controls_frame, text="Select Excel", command=self.load_excel_data, width=12).grid(row=1, column=1, padx=5, pady=2, sticky="e")
-        tk.Entry(controls_frame, textvariable=self.excel_display_var, width=40, state="readonly").grid(row=1, column=2, padx=5, pady=2, sticky="ew")
+        self.excel_selection_frame = customtkinter.CTkFrame(self.left_controls_panel)
+        # Packed/unpacked by _on_signature_mode_change
+        customtkinter.CTkLabel(self.excel_selection_frame, text="Excel Data File:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        customtkinter.CTkButton(self.excel_selection_frame, text="Select Excel", command=self.load_excel_data, width=100).grid(row=1, column=0, padx=5, pady=2, sticky="ew")
+        self.excel_display_entry = customtkinter.CTkEntry(self.excel_selection_frame, textvariable=self.excel_display_var, width=180, state="disabled")
+        self.excel_display_entry.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
+        self.excel_selection_frame.grid_columnconfigure(1, weight=1)
 
         # Output Directory Selection
-        tk.Label(controls_frame, text="Output Folder:").grid(row=2, column=0, sticky="e", padx=5, pady=2)
-        tk.Button(controls_frame, text="Select Folder", command=self.select_output_dir, width=12).grid(row=2, column=1, padx=5, pady=2, sticky="e")
-        tk.Entry(controls_frame, textvariable=self.output_dir_display_var, width=40, state="readonly").grid(row=2, column=2, padx=5, pady=2, sticky="ew")
+        self.output_dir_frame = customtkinter.CTkFrame(self.left_controls_panel)
+        # Packed/unpacked by _on_signature_mode_change
+        customtkinter.CTkLabel(self.output_dir_frame, text="Output Folder:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        customtkinter.CTkButton(self.output_dir_frame, text="Select Folder", command=self.select_output_dir, width=100).grid(row=1, column=0, padx=5, pady=2, sticky="ew")
+        self.output_dir_display_entry = customtkinter.CTkEntry(self.output_dir_frame, textvariable=self.output_dir_display_var, width=180, state="disabled")
+        self.output_dir_display_entry.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
+        self.output_dir_frame.grid_columnconfigure(1, weight=1)
 
         # Font Selection
-        tk.Label(controls_frame, text="Font Family:").grid(row=3, column=0, sticky="e", padx=5, pady=2)
-        font_details_frame = tk.Frame(controls_frame)
-        font_details_frame.grid(row=3, column=1, columnspan=2, sticky="e", padx=5, pady=2) 
+        self.font_controls_frame = customtkinter.CTkFrame(self.left_controls_panel)
+        # Packed/unpacked by _on_signature_mode_change
+        customtkinter.CTkLabel(self.font_controls_frame, text="Font Family:").pack(side=tk.TOP, anchor="w", padx=5, pady=(5,0))
+        font_details_subframe = customtkinter.CTkFrame(self.font_controls_frame, fg_color="transparent")
+        font_details_subframe.pack(fill=tk.X, padx=0, pady=0)
         
         # Populate font families
         font_families = sorted(list(tkFont.families()))
-        self.font_combo = ttk.Combobox(font_details_frame, textvariable=self.font_family_var, values=font_families, width=23, state="readonly")
+        self.font_combo = customtkinter.CTkComboBox(font_details_subframe, variable=self.font_family_var, values=font_families, width=180, state="readonly")
         if "Arial" in font_families:
             self.font_family_var.set("Arial") # Default font
         elif font_families:
             self.font_family_var.set(font_families[0]) # Fallback to first available font
-        self.font_combo.pack(side=tk.LEFT)
+        self.font_combo.pack(side=tk.LEFT, padx=(5,2), pady=2)
 
-        tk.Label(font_details_frame, text="Size:").pack(side=tk.LEFT, padx=(10, 2))
-        tk.Entry(font_details_frame, textvariable=self.font_size_var, width=5).pack(side=tk.LEFT)
+        customtkinter.CTkLabel(font_details_subframe, text="Size:").pack(side=tk.LEFT, padx=(10, 2), pady=2)
+        self.font_size_entry = customtkinter.CTkEntry(font_details_subframe, textvariable=self.font_size_var, width=40)
+        self.font_size_entry.pack(side=tk.LEFT, padx=(0,2), pady=2)
 
-        # Zoom controls and Text Preview Button
-        zoom_preview_frame = tk.Frame(controls_frame)
-        zoom_preview_frame.grid(row=4, column=0, columnspan=3, sticky="e", pady=5) # Adjusted row
-        tk.Button(zoom_preview_frame, text="-", command=lambda: self.zoom(-0.2)).pack(side=tk.LEFT, padx=2)
-        tk.Label(zoom_preview_frame, textvariable=self.zoom_display_var).pack(side=tk.LEFT, padx=5)
-        tk.Button(zoom_preview_frame, text="+", command=lambda: self.zoom(0.2)).pack(side=tk.LEFT, padx=2)
+        customtkinter.CTkButton(font_details_subframe, text="-", command=lambda: self._adjust_font_size(-1), width=25).pack(side=tk.LEFT, padx=(0,2), pady=2)
+        customtkinter.CTkButton(font_details_subframe, text="+", command=lambda: self._adjust_font_size(1), width=25).pack(side=tk.LEFT, padx=(0,5), pady=2)
+
+        # --- Zoom Controls ---
+        self.zoom_frame = customtkinter.CTkFrame(self.left_controls_panel)
+        self.zoom_frame.pack(fill=tk.X, padx=5, pady=5)
+        customtkinter.CTkLabel(self.zoom_frame, text="Zoom:").pack(side=tk.LEFT, padx=(5,0))
+        customtkinter.CTkButton(self.zoom_frame, text="-", command=lambda: self.zoom(-0.2), width=30).pack(side=tk.LEFT, padx=2)
+        customtkinter.CTkLabel(self.zoom_frame, textvariable=self.zoom_display_var).pack(side=tk.LEFT, padx=5)
+        customtkinter.CTkButton(self.zoom_frame, text="+", command=lambda: self.zoom(0.2), width=30).pack(side=tk.LEFT, padx=2)
         
-        # Preview Row Controls
-        self.prev_row_button = tk.Button(zoom_preview_frame, text="↑", command=lambda: self._change_preview_row(-1), state=tk.DISABLED, width=2)
+        # --- Text Preview Row Controls ---
+        self.text_row_preview_frame = customtkinter.CTkFrame(self.left_controls_panel)
+        # Packed/unpacked by _on_signature_mode_change
+        customtkinter.CTkLabel(self.text_row_preview_frame, text="Preview Row:").pack(side=tk.LEFT, padx=(5,0))
+        self.prev_row_button = customtkinter.CTkButton(self.text_row_preview_frame, text="↑", command=lambda: self._change_preview_row(-1), state=tk.DISABLED, width=30)
         self.prev_row_button.pack(side=tk.LEFT, padx=(15,0)) 
 
-        self.preview_row_label = tk.Label(zoom_preview_frame, textvariable=self.preview_row_display, width=8)
+        self.preview_row_label = customtkinter.CTkLabel(self.text_row_preview_frame, textvariable=self.preview_row_display, width=70) # width in pixels
         self.preview_row_label.pack(side=tk.LEFT, padx=2)
 
-        self.next_row_button = tk.Button(zoom_preview_frame, text="↓", command=lambda: self._change_preview_row(1), state=tk.DISABLED, width=2)
+        self.next_row_button = customtkinter.CTkButton(self.text_row_preview_frame, text="↓", command=lambda: self._change_preview_row(1), state=tk.DISABLED, width=30)
         self.next_row_button.pack(side=tk.LEFT, padx=(0,5))
 
-        self.toggle_text_preview_button = tk.Button(zoom_preview_frame, text="Show/Hide Preview", command=self.toggle_text_preview)
+        self.toggle_text_preview_button = customtkinter.CTkButton(self.text_row_preview_frame, text="Show/Hide Preview", command=self.toggle_text_preview)
         self.toggle_text_preview_button.pack(side=tk.LEFT, padx=(10,0))
-        # "Generate current PDF" button moved below
 
-        # Generate Buttons Frame (for main generate and current generate)
-        generate_buttons_frame = tk.Frame(controls_frame)
-        generate_buttons_frame.grid(row=5, column=0, columnspan=3, sticky="e", pady=10)
+        # --- Generate Buttons Frame (Define earlier, pack later at the bottom) ---
+        self.generate_buttons_frame = customtkinter.CTkFrame(self.left_controls_panel)
+        # self.generate_buttons_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(10,5)) # Packing moved to the end
 
-        self.generate_all_pdfs_button = tk.Button(generate_buttons_frame, text="Generate PDF Files", command=self.generate_output_pdfs, bg="lightblue", font=("Arial", 12, "bold"))
-        self.generate_all_pdfs_button.pack(side=tk.RIGHT, padx=(5,0)) 
+        self.generate_all_pdfs_button = customtkinter.CTkButton(self.generate_buttons_frame, text="Generate PDF Files", command=self.generate_output_pdfs, font=("Arial", 12, "bold"), fg_color="#A6D8F0", text_color="black", hover_color="#8AC7E6")
+        self.generate_current_pdf_button = customtkinter.CTkButton(self.generate_buttons_frame, text="Generate Current PDF", command=self.generate_single_preview_pdf)
 
-        self.generate_current_pdf_button = tk.Button(generate_buttons_frame, text="Generate Current PDF", command=self.generate_single_preview_pdf)
-        self.generate_current_pdf_button.pack(side=tk.RIGHT)
 
-        # Store references to text-injection specific control groups for easy hide/show
-        self.text_injection_controls_row0 = [controls_frame.grid_slaves(row=0, column=c)[0] for c in range(3) if controls_frame.grid_slaves(row=0, column=c)]
-        self.text_injection_controls_row1 = [controls_frame.grid_slaves(row=1, column=c)[0] for c in range(3) if controls_frame.grid_slaves(row=1, column=c)]
-        self.text_injection_controls_row2 = [controls_frame.grid_slaves(row=2, column=c)[0] for c in range(3) if controls_frame.grid_slaves(row=2, column=c)] # Output folder might be shared
-        self.text_injection_controls_row3 = [controls_frame.grid_slaves(row=3, column=c)[0] for c in range(3) if controls_frame.grid_slaves(row=3, column=c)]
-        # Row 4 (zoom/preview) is shared. Row 5 (generate buttons) is handled separately.
 
-        # --- Signature Mode Controls (initially hidden, placed in controls_frame) ---
-        self.signature_controls_frame = tk.Frame(controls_frame)
-        # This frame is no longer used for primary signature controls, they are now in the sidebar.
-        # The "Delete Selected Signature" button is now built dynamically in the sidebar.
-        
+        # --- Generate Buttons Frame ---
+
+        # --- Column/Signature Controls Sidebar ---
+        # This will be packed into left_controls_panel
+        self.column_controls_sidebar = customtkinter.CTkFrame(self.left_controls_panel, border_width=1)
+        # Packed/unpacked by _on_signature_mode_change, content built by _build_dynamic_coord_controls
+
         self.signature_mode_active.trace_add("write", self._on_signature_mode_change)
 
         # PDF Page Navigation Frame (below content_area, above status_label)
-        self.pdf_nav_frame = tk.Frame(main_app_frame)
+        self.pdf_nav_frame = customtkinter.CTkFrame(self.right_pdf_panel, fg_color="transparent") # Moved to right_pdf_panel
         # This frame will be packed later, only if a PDF is loaded.
-        self.prev_pdf_page_button = tk.Button(self.pdf_nav_frame, text="< Prev Page", command=lambda: self._change_pdf_page(-1), state=tk.DISABLED)
+        self.prev_pdf_page_button = customtkinter.CTkButton(self.pdf_nav_frame, text="< Prev Page", command=lambda: self._change_pdf_page(-1), state=tk.DISABLED, width=100)
         self.prev_pdf_page_button.pack(side=tk.LEFT, padx=5, pady=2)
-        self.pdf_page_label = tk.Label(self.pdf_nav_frame, textvariable=self.pdf_page_display_var, width=15)
+        self.pdf_page_label = customtkinter.CTkLabel(self.pdf_nav_frame, textvariable=self.pdf_page_display_var, width=100) # width in pixels
         self.pdf_page_label.pack(side=tk.LEFT, padx=5, pady=2)
-        self.next_pdf_page_button = tk.Button(self.pdf_nav_frame, text="Next Page >", command=lambda: self._change_pdf_page(1), state=tk.DISABLED)
+        self.next_pdf_page_button = customtkinter.CTkButton(self.pdf_nav_frame, text="Next Page >", command=lambda: self._change_pdf_page(1), state=tk.DISABLED, width=100)
         self.next_pdf_page_button.pack(side=tk.LEFT, padx=5, pady=2)
 
-
         # Status Label
-        self.status_label = tk.Label(main_app_frame, text="Please load a PDF template to begin.", bd=1, relief=tk.SUNKEN, anchor=tk.W)
-        self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
-        # Pack pdf_nav_frame *before* status_label so it's above
+        self.status_label = customtkinter.CTkLabel(self.right_pdf_panel, text="Please load a PDF template to begin.", anchor="w") # Moved to right_pdf_panel
+        
+        # Packing order for right_pdf_panel content
+        self.canvas_container = customtkinter.CTkFrame(self.right_pdf_panel, border_width=1) # Replaces bd/relief
+        self.canvas_container.pack(fill=tk.BOTH, expand=True, padx=0, pady=0) # Fill available space
+        
         self.pdf_nav_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(0,2))
         self.pdf_nav_frame.pack_forget() # Initially hidden
-
-        # Canvas for PDF Preview
-        self.canvas_container = tk.Frame(content_area_frame, bd=2, relief=tk.SUNKEN)
-        self.canvas_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0,5))
-
-        # Sidebar for dynamic column controls
-        self.column_controls_sidebar = tk.Frame(content_area_frame, width=200, bd=1, relief=tk.RAISED)
-        self.column_controls_sidebar.pack(side=tk.RIGHT, fill=tk.Y, padx=(5,0))
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X, pady=(2,0))
+        
+        # NOTE: tk.Canvas is used here as CustomTkinter does not have a direct equivalent
+        # with the same rich drawing and event binding capabilities.
+        # tk.Scrollbar is also used for compatibility with tk.Canvas.
         self.canvas = tk.Canvas(self.canvas_container, bg="lightgrey") # Changed bg for better visibility
 
         self.h_scrollbar = tk.Scrollbar(self.canvas_container, orient=tk.HORIZONTAL, command=self.canvas.xview)
@@ -265,47 +325,102 @@ class PDFBatchApp:
         master.bind("<Delete>", self._on_delete_key_press) # Bind Delete key to the master window
 
         # Initially hide mode-specific controls until a PDF is loaded
-        # Excel controls (row 1)
-        for widget in self.text_injection_controls_row1:
-            widget.grid_remove()
-        # Output folder controls (row 2)
-        for widget in self.text_injection_controls_row2:
-            widget.grid_remove()
-        # Font controls (row 3)
-        for widget in self.text_injection_controls_row3:
-            widget.grid_remove()
-
-        # Text-specific parts of zoom_preview_frame
-        self.prev_row_button.pack_forget()
-        self.preview_row_label.pack_forget()
-        self.next_row_button.pack_forget()
-        self.toggle_text_preview_button.pack_forget()
-        # Text-specific generate button
+        self.excel_selection_frame.pack_forget()
+        self.output_dir_frame.pack_forget()
+        self.font_controls_frame.pack_forget()
+        self.text_row_preview_frame.pack_forget()
         self.generate_all_pdfs_button.pack_forget()
+        self.column_controls_sidebar.pack_forget()
+
         # The generate_current_pdf_button's text and command will be set by _on_signature_mode_change
         # The column_controls_sidebar content is built by _build_dynamic_coord_controls, called by _on_signature_mode_change.
+        self._on_signature_mode_change() # Call once to set initial state based on self.signature_mode_active
+
+        # --- Pack Generate Buttons Frame (Packed last in left_controls_panel to be at the bottom) ---
+        self.generate_buttons_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(10,5)) # side=tk.BOTTOM
+
+        # Add panels to PanedWindow
+        self.paned_window.add(self.left_pane_content_frame, minsize=280)  # Add the intermediate frame
+        self.paned_window.add(self.right_pane_content_frame, minsize=400) # Add the intermediate frame
+
+        # Schedule setting the initial sash position after the window is mapped
+        self.initial_sash_set_flag = False # Flag to ensure sash is set only once
+        self.paned_window.bind("<Configure>", self._set_initial_sash_position_on_configure)
+        # self.master.after(150, self._set_initial_sash_position) # Old method
+
+    def _set_initial_sash_position_on_configure(self, event=None):
+        if self.initial_sash_set_flag:
+            return # Already set
+
+        try:
+            # update_idletasks might not be strictly necessary here as <Configure> implies readiness
+            # but it doesn't hurt, and can help ensure winfo_width is current.
+            self.paned_window.update_idletasks()
+            pw_width = self.paned_window.winfo_width()
+            master_width = self.master.winfo_width() # Get current master window width
+
+            print(f"DEBUG: Configure event. MasterW: {master_width}, PaneW: {pw_width}, Flag: {self.initial_sash_set_flag}")
+
+            # We set the sash if the PanedWindow's width is substantial.
+            # Let's assume the PanedWindow should eventually be close to the master window's width.
+            # We'll proceed if pw_width is at least, say, 70% of master_width, and also above an absolute minimum.
+            # This helps ensure we're not acting on intermediate, small sizes during window creation.
+            if pw_width > (master_width * 0.7) and pw_width > 800: # Heuristic: pw_width is significant
+                # Calculate sash position as 40% of the current PanedWindow width
+                sash_pos = int(pw_width * 0.30) # Changed to 30% for the left pane
+
+                print(f"DEBUG: Attempting sash_place. pw_width={pw_width}, master_width={master_width}, calculated sash_pos={sash_pos}")
+
+                # Ensure the calculated sash position respects the minsize of the left pane (280)
+                # Also ensure that the remaining width for the right pane respects its minsize (400).
+                # For paneconfigure, we calculate target_left_width and ensure it and the remainder meet minsizes.
+                target_left_width = sash_pos # sash_pos is already calculated as pw_width * 0.40
+                remaining_width_for_right = pw_width - target_left_width
+
+                if target_left_width >= 280 and remaining_width_for_right >= 400:
+                    self.paned_window.paneconfigure(self.left_pane_content_frame, width=target_left_width) # Pass the widget instance
+                    self.initial_sash_set_flag = True
+                    
+                    # Check actual sash position after setting
+                    actual_sash_coord = self.paned_window.sash_coord(0)
+                    print(f"DEBUG: Paneconfigure applied. PaneW: {pw_width}, Target Left Width: {target_left_width}, Actual Sash Coord: {actual_sash_coord}. Unbinding.")
+                    self.paned_window.unbind("<Configure>") # Unbind only after successful, satisfactory setting
+                else:
+                    print(f"DEBUG: Calculated target_left_width {target_left_width} or remaining_width {remaining_width_for_right} (from pw_width {pw_width}) does not meet minsize constraints (L:280, R:400). Deferring.")
+            else:
+                print(f"DEBUG: PaneW {pw_width} (MasterW {master_width}) not yet sufficient for primary condition. Deferring sash set.")
+        except tk.TclError as e:
+            if "invalid command name" not in str(e).lower(): # Avoid spam on window close
+                print(f"Error setting initial sash position on configure (widget might be gone): {e}")
+        except Exception as e: # Catch other potential errors, e.g. if master.winfo_width() is not ready early on
+            print(f"Unexpected error in _set_initial_sash_position_on_configure: {e}")
+
+    def _toggle_theme(self):
+        current_mode = customtkinter.get_appearance_mode()
+        if current_mode == "Light":
+            customtkinter.set_appearance_mode("Dark")
+        else:
+            customtkinter.set_appearance_mode("Light")
 
     def _on_signature_mode_change(self, *args):
         is_sig_mode = self.signature_mode_active.get()
         if is_sig_mode:
-            self.status_label.config(text="Signature mode active. Load a signature image and place it on the document.")
+            self.status_label.configure(text="Signature mode active. Load a signature image and place it on the document.")
             # Hide text injection controls
-            for widget_list in [self.text_injection_controls_row1,  # Excel
-                                self.text_injection_controls_row2,  # Output Folder
-                                self.text_injection_controls_row3]: # Font
-                for widget in widget_list:
-                    widget.grid_remove()
+            self.excel_selection_frame.pack_forget()
+            self.output_dir_frame.pack_forget()
+            self.font_controls_frame.pack_forget()
+            self.text_row_preview_frame.pack_forget()
             self.column_controls_sidebar.pack_forget() # Hide column sidebar
             self.generate_all_pdfs_button.pack_forget() # Hide batch generate
-            self.generate_current_pdf_button.config(text="Create Signed PDF", command=self.generate_signed_pdf)
+            self.generate_current_pdf_button.configure(text="Create Signed PDF", command=self.generate_signed_pdf)
+            self.generate_current_pdf_button.pack(side=tk.RIGHT) # Ensure it's packed
             
             # Ensure text-specific preview controls are hidden
             self.prev_row_button.pack_forget()
             self.preview_row_label.pack_forget()
-            self.next_row_button.pack_forget()
-            self.toggle_text_preview_button.pack_forget()
-            
-            self.signature_controls_frame.grid_remove() # Ensure the old frame for delete button is hidden
+            self.next_row_button.pack_forget() # These are part of text_row_preview_frame
+            self.toggle_text_preview_button.pack_forget() # These are part of text_row_preview_frame
             
             # Clear text-related previews and data
             self.excel_data_preview = None
@@ -314,36 +429,27 @@ class PDFBatchApp:
             self._update_text_preview() # Clears text preview
             self._draw_markers() # Clears markers
             self.excel_display_var.set("(N/A in Signature Mode)")
-            self.column_controls_sidebar.pack(side=tk.RIGHT, fill=tk.Y, padx=(5,0)) # Ensure sidebar is visible
+            self.column_controls_sidebar.pack(fill=tk.BOTH, expand=True, padx=5, pady=5) # Ensure sidebar is visible
 
         else: # Text injection mode
-            self.status_label.config(text="Text injection mode. Load PDF, Excel and define positions.")
+            self.status_label.configure(text="Text injection mode. Load PDF, Excel and define positions.")
             # Show text injection controls
-            # Row 1: Excel
-            for col_idx, widget in enumerate(self.text_injection_controls_row1):
-                if col_idx == 0: widget.grid(row=1, column=0, sticky="e", padx=5, pady=2) # Label
-                elif col_idx == 1: widget.grid(row=1, column=1, padx=5, pady=2, sticky="e") # Button
-                elif col_idx == 2: widget.grid(row=1, column=2, padx=5, pady=2, sticky="ew") # Entry
-            # Row 2: Output Folder
-            for col_idx, widget in enumerate(self.text_injection_controls_row2):
-                if col_idx == 0: widget.grid(row=2, column=0, sticky="e", padx=5, pady=2) # Label
-                elif col_idx == 1: widget.grid(row=2, column=1, padx=5, pady=2, sticky="e") # Button
-                elif col_idx == 2: widget.grid(row=2, column=2, padx=5, pady=2, sticky="ew") # Entry
-            # Row 3: Font
-            for col_idx, widget in enumerate(self.text_injection_controls_row3):
-                if col_idx == 0: widget.grid(row=3, column=0, sticky="e", padx=5, pady=2) # Label
-                elif col_idx == 1: widget.grid(row=3, column=1, columnspan=2, sticky="e", padx=5, pady=2) # font_details_frame
-            self.column_controls_sidebar.pack(side=tk.RIGHT, fill=tk.Y, padx=(5,0)) # Show column sidebar
-            self.generate_all_pdfs_button.pack(side=tk.RIGHT, padx=(5,0))
-            self.generate_current_pdf_button.config(text="Generate Current PDF", command=self.generate_single_preview_pdf)
-
-            # Ensure text-specific preview controls are visible
-            self.prev_row_button.pack(side=tk.LEFT, padx=(15,0))
-            self.preview_row_label.pack(side=tk.LEFT, padx=2)
-            self.next_row_button.pack(side=tk.LEFT, padx=(0,5))
-            self.toggle_text_preview_button.pack(side=tk.LEFT, padx=(10,0))
+            self.excel_selection_frame.pack(fill=tk.X, padx=5, pady=5)
+            self.output_dir_frame.pack(fill=tk.X, padx=5, pady=5)
+            self.font_controls_frame.pack(fill=tk.X, padx=5, pady=5)
+            self.text_row_preview_frame.pack(fill=tk.X, padx=5, pady=5)
+            self.column_controls_sidebar.pack(fill=tk.BOTH, expand=True, padx=5, pady=5) # Show column sidebar
             
-            self.signature_controls_frame.grid_remove() 
+            # Ensure correct buttons are shown in generate_buttons_frame
+            self.generate_all_pdfs_button.pack(side=tk.RIGHT, padx=(5,0))
+            self.generate_current_pdf_button.pack(side=tk.RIGHT) # Ensure it's packed
+            self.generate_current_pdf_button.configure(text="Generate Current PDF", command=self.generate_single_preview_pdf)
+            # Ensure text-specific preview controls (already packed within text_row_preview_frame)
+            # self.prev_row_button.pack(side=tk.LEFT, padx=(15,0))
+            # self.preview_row_label.pack(side=tk.LEFT, padx=2)
+            # self.next_row_button.pack(side=tk.LEFT, padx=(0,5))
+            # self.toggle_text_preview_button.pack(side=tk.LEFT, padx=(10,0))
+            
             # Clear signature data
             self.loaded_signature_pil_images = []
             self.placed_signatures_data = []
@@ -367,59 +473,68 @@ class PDFBatchApp:
 
         if self.signature_mode_active.get():
             # --- Section 1: Load New Signature Button ---
-            load_button_frame = tk.Frame(self.column_controls_sidebar)
+            load_button_frame = customtkinter.CTkFrame(self.column_controls_sidebar, fg_color="transparent")
             load_button_frame.pack(fill=tk.X, pady=5, padx=5)
-            tk.Button(load_button_frame, text="Load New Signature Image", command=self.load_signature_image_prompt).pack(fill=tk.X)
+            customtkinter.CTkButton(load_button_frame, text="Load New Signature Image", command=self.load_signature_image_prompt).pack(fill=tk.X)
 
             # --- Section 2: Available Signatures (Loaded but not yet placed) ---
-            tk.Label(self.column_controls_sidebar, text="Available for Placing:", anchor="w").pack(fill=tk.X, pady=(10,2), padx=5)
-            available_list_container = tk.Frame(self.column_controls_sidebar, bd=1, relief=tk.SUNKEN)
+            customtkinter.CTkLabel(self.column_controls_sidebar, text="Available for Placing:", anchor="w").pack(fill=tk.X, pady=(10,2), padx=5)
+            available_list_container = customtkinter.CTkFrame(self.column_controls_sidebar, border_width=1) # Replaces bd/relief
             available_list_container.pack(fill=tk.X, padx=5, pady=(0,10))
             
             if not self.loaded_signature_pil_images:
-                tk.Label(available_list_container, text="(None loaded)").pack(pady=5)
+                customtkinter.CTkLabel(available_list_container, text="(None loaded)").pack(pady=5)
             else:
                 for idx, (_, _, display_name) in enumerate(self.loaded_signature_pil_images):
-                    f_avail = tk.Frame(available_list_container)
+                    f_avail = customtkinter.CTkFrame(available_list_container, fg_color="transparent")
                     f_avail.pack(fill=tk.X, padx=2, pady=1)
-                    bg_color = "lightyellow" if idx == self.active_signature_pil_idx_to_place.get() else f_avail.cget("bg")
+                    
+                    # Determine fg_color for the label or its frame based on selection
+                    # CTk uses fg_color for background. Default is transparent for labels unless set.
+                    # Use a theme-aware selection color or a neutral one.
+                    # For instance, using a slightly darker shade of the default button color when selected.
+                    # Or a specific color that works well in both light/dark modes.
+                    ctk_bg_color = customtkinter.ThemeManager.theme["CTkButton"]["fg_color"] if idx == self.active_signature_pil_idx_to_place.get() else "transparent"
+                    f_avail.configure(fg_color=ctk_bg_color)
                     
                     avail_label_text = f"{idx+1}. {display_name[:20]}{'...' if len(display_name) > 20 else ''}"
-                    avail_label = tk.Label(f_avail, text=avail_label_text, anchor="w", bg=bg_color, padx=3)
+                    # Label itself should be transparent to show frame's color
+                    avail_label = customtkinter.CTkLabel(f_avail, text=avail_label_text, anchor="w", padx=3, fg_color="transparent")
                     avail_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
                     avail_label.bind("<Button-1>", lambda e, i=idx: self._set_active_signature_for_placing(i))
 
             # --- Section 2.5: Delete Selected Signature Button (if a signature is selected) ---
             if self.selected_placed_signature_idx.get() != -1:
-                delete_button_frame = tk.Frame(self.column_controls_sidebar)
+                delete_button_frame = customtkinter.CTkFrame(self.column_controls_sidebar, fg_color="transparent")
                 delete_button_frame.pack(fill=tk.X, pady=(10,0), padx=5)
-                tk.Button(delete_button_frame, text="Delete Selected", command=self.delete_selected_placed_signature, bg="salmon").pack(fill=tk.X)
+                customtkinter.CTkButton(delete_button_frame, text="Delete Selected", command=self.delete_selected_placed_signature, fg_color="salmon", text_color="black", hover_color="#E07A70").pack(fill=tk.X)
             
             # --- Section 3: Placed Signatures on Document ---
-            tk.Label(self.column_controls_sidebar, text="Placed on Document:", anchor="w").pack(fill=tk.X, pady=(10,2), padx=5)
+            customtkinter.CTkLabel(self.column_controls_sidebar, text="Placed on Document:", anchor="w").pack(fill=tk.X, pady=(10,2), padx=5)
             selected_placed_idx = self.selected_placed_signature_idx.get()
             for idx, sig_data_item in enumerate(self.placed_signatures_data):
                 pil_image_idx = sig_data_item['pil_image_idx']
                 _, _, display_name = self.loaded_signature_pil_images[pil_image_idx]
                 
-                item_frame = tk.Frame(self.column_controls_sidebar, bd=1, relief=tk.SOLID)
+                item_frame = customtkinter.CTkFrame(self.column_controls_sidebar, border_width=1) # Replaces bd/relief
                 item_frame.pack(fill=tk.X, padx=5, pady=3)
                 if idx == selected_placed_idx:
-                    item_frame.config(bg="lightblue") # Highlight selected
+                    # Use a theme-aware selection color
+                    item_frame.configure(fg_color=customtkinter.ThemeManager.theme["CTkButton"]["hover_color"]) # Highlight selected
 
                 label_text = f"Sig {idx + 1}: {display_name[:15]}{'...' if len(display_name) > 15 else ''}" # Truncate name
-                tk.Label(item_frame, text=label_text, anchor="w").pack(side=tk.LEFT, padx=(2,5), fill=tk.X, expand=True)
+                customtkinter.CTkLabel(item_frame, text=label_text, anchor="w", fg_color="transparent").pack(side=tk.LEFT, padx=(2,5), fill=tk.X, expand=True)
                 
-                tk.Button(item_frame, text="Del", command=lambda i=idx: self._handle_sidebar_delete_signature(i), width=3).pack(side=tk.RIGHT, padx=(0,2))
-                tk.Button(item_frame, text="Sel", command=lambda i=idx: self._handle_sidebar_select_signature(i), width=3).pack(side=tk.RIGHT, padx=(0,2))
+                customtkinter.CTkButton(item_frame, text="Del", command=lambda i=idx: self._handle_sidebar_delete_signature(i), width=35).pack(side=tk.RIGHT, padx=(0,2))
+                customtkinter.CTkButton(item_frame, text="Sel", command=lambda i=idx: self._handle_sidebar_select_signature(i), width=35).pack(side=tk.RIGHT, padx=(0,2))
             
             if not self.placed_signatures_data:
-                 tk.Label(self.column_controls_sidebar, text="(None placed on document)", justify=tk.CENTER).pack(pady=10)
+                 customtkinter.CTkLabel(self.column_controls_sidebar, text="(None placed on document)", anchor="center").pack(pady=10, fill=tk.X)
 
 
         else: # Text injection mode
             if self.num_excel_cols == 0:
-                tk.Label(self.column_controls_sidebar, text="Load Excel file\nto define text fields.", justify=tk.CENTER).pack(pady=20)
+                customtkinter.CTkLabel(self.column_controls_sidebar, text="Load Excel file\nto define text fields.", anchor="center").pack(pady=20, fill=tk.X)
                 return
 
             for i in range(self.num_excel_cols):
@@ -432,16 +547,16 @@ class PDFBatchApp:
                     status_var.set("✔") # Set to placed if coord exists
                 self.col_status_vars.append(status_var)
 
-                item_frame = tk.Frame(self.column_controls_sidebar, bd=1, relief=tk.SOLID)
+                item_frame = customtkinter.CTkFrame(self.column_controls_sidebar, border_width=1) # Replaces bd/relief
                 item_frame.pack(fill=tk.X, padx=5, pady=3)
 
                 status_label_text = f"Col {i+1}:"
                 
-                tk.Label(item_frame, textvariable=status_var, width=2, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(2,0))
-                tk.Label(item_frame, text=status_label_text).pack(side=tk.LEFT, padx=(0,5))
+                customtkinter.CTkLabel(item_frame, textvariable=status_var, width=25, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(2,0)) # width in pixels
+                customtkinter.CTkLabel(item_frame, text=status_label_text).pack(side=tk.LEFT, padx=(0,5))
                 
-                ttk.Checkbutton(item_frame, text="RTL", variable=rtl_var, width=5).pack(side=tk.LEFT, padx=(0,5))
-                tk.Button(item_frame, text="Move", command=lambda idx=i: self.prepare_to_set_coord(idx)).pack(side=tk.LEFT, padx=5)
+                customtkinter.CTkCheckBox(item_frame, text="RTL", variable=rtl_var, width=50).pack(side=tk.LEFT, padx=(0,5)) # width in pixels
+                customtkinter.CTkButton(item_frame, text="Move", command=lambda idx=i: self.prepare_to_set_coord(idx), width=50).pack(side=tk.LEFT, padx=5)
 
     def _handle_sidebar_select_signature(self, sig_idx):
         self._select_placed_signature(sig_idx)
@@ -453,23 +568,33 @@ class PDFBatchApp:
     def _set_active_signature_for_placing(self, pil_idx):
         if 0 <= pil_idx < len(self.loaded_signature_pil_images):
             self.active_signature_pil_idx_to_place.set(pil_idx)
-            self.status_label.config(text=f"Ready to place: {self.loaded_signature_pil_images[pil_idx][2]}. Click on PDF.")
+            self.status_label.configure(text=f"Ready to place: {self.loaded_signature_pil_images[pil_idx][2]}. Click on PDF.")
             self._build_dynamic_coord_controls() # Refresh sidebar to show selection
 
     def _on_font_change(self, *args):
         if self.is_text_preview_active and not self.signature_mode_active.get():
             self._update_text_preview()
 
+    def _adjust_font_size(self, delta):
+        try:
+            current_size = self.font_size_var.get()
+            new_size = current_size + delta
+            if new_size >= 1: # Ensure font size is at least 1
+                self.font_size_var.set(new_size)
+            # The trace on font_size_var will call _on_font_change
+        except tk.TclError: # Handle cases where entry might be temporarily invalid
+            pass
+
     def prepare_to_set_coord(self, col_idx):
         if self.pdf_doc:
             self.active_coord_to_set_idx = col_idx
-            self.status_label.config(text=f"Select position for column {col_idx + 1} on the image, or drag the marker.")
+            self.status_label.configure(text=f"Select position for column {col_idx + 1} on the image, or drag the marker.")
             self._drag_data["item"] = None
             # If text preview is active, update it to potentially clear old highlights or focus
             if self.is_text_preview_active:
                 self._update_text_preview()
         else:
-            self.status_label.config(text="Please load a PDF file first.")
+            self.status_label.configure(text="Please load a PDF file first.")
 
     def _change_preview_row(self, direction):
         if self.excel_data_preview is None or self.excel_data_preview.empty:
@@ -486,42 +611,53 @@ class PDFBatchApp:
                 self._update_text_preview()
 
     def _update_preview_row_display_and_buttons(self):
-        if self.excel_data_preview is not None and not self.excel_data_preview.empty:
+        if self.excel_data_preview is not None and not self.excel_data_preview.empty and hasattr(self, 'prev_row_button'): # Ensure buttons exist
             current_idx = self.preview_row_index.get()
             num_rows = self.excel_data_preview.shape[0]
-            self.preview_row_display.set(f"Row: {current_idx + 1}")
+            self.preview_row_display.set(f"Row: {current_idx + 1}/{num_rows}")
 
-            self.prev_row_button.config(state=tk.NORMAL if current_idx > 0 else tk.DISABLED)
-            self.next_row_button.config(state=tk.NORMAL if current_idx < num_rows - 1 else tk.DISABLED)
+            self.prev_row_button.configure(state=tk.NORMAL if current_idx > 0 else tk.DISABLED)
+            self.next_row_button.configure(state=tk.NORMAL if current_idx < num_rows - 1 else tk.DISABLED)
         else:
             self.preview_row_display.set("Row: -")
-            self.prev_row_button.config(state=tk.DISABLED)
-            self.next_row_button.config(state=tk.DISABLED)
+            self.prev_row_button.configure(state=tk.DISABLED)
+            self.next_row_button.configure(state=tk.DISABLED)
 
     def _handle_mouse_wheel_zoom(self, event):
+        # Cancel any pending zoom operation
+        if self._zoom_debounce_timer is not None:
+            self.master.after_cancel(self._zoom_debounce_timer)
+
+        # Schedule the zoom operation
+        self._zoom_debounce_timer = self.master.after(self._DEBOUNCE_TIME_MS, lambda e=event: self._perform_zoom_from_wheel(e))
+
+    def _perform_zoom_from_wheel(self, event):
+        """This method is called after the debounce delay."""
+        self._zoom_debounce_timer = None # Reset timer ID
+
         if not self.pdf_doc:
             return
 
         # Get mouse position on canvas (relative to the top-left of the scrollable content)
         # and widget coordinates (relative to the canvas widget itself)
-        mouse_x_on_image_before_zoom = self.canvas.canvasx(event.x)
-        mouse_y_on_image_before_zoom = self.canvas.canvasy(event.y)
+        mouse_x_img_old = self.canvas.canvasx(event.x)
+        mouse_y_img_old = self.canvas.canvasy(event.y)
 
         factor_change = 0
         # Respond to Linux wheel events
         if event.num == 4: # Scroll up
-            factor_change = 0.1
+            factor_change = 0.25 # Increased zoom step
         elif event.num == 5: # Scroll down
-            factor_change = -0.1
+            factor_change = -0.25
         # Respond to Windows/Mac wheel events
         elif event.delta > 0: # Scroll up
-            factor_change = 0.1
+            factor_change = 0.25
         elif event.delta < 0: # Scroll down
-            factor_change = -0.1
+            factor_change = -0.25
         
         if factor_change != 0:
             # Pass mouse coordinates to the zoom function
-            self.zoom(factor_change, mouse_x_on_image_before_zoom, mouse_y_on_image_before_zoom, event.x, event.y)
+            self.zoom(factor_change, mouse_x_img_old, mouse_y_img_old, event.x, event.y)
 
     def zoom(self, factor_change, mouse_x_img_old=None, mouse_y_img_old=None, mouse_widget_x=None, mouse_widget_y=None):
         """
@@ -538,8 +674,8 @@ class PDFBatchApp:
         # Clamp new_zoom to min/max values
         if potential_new_zoom < 0.2:
             new_zoom = 0.2
-        elif potential_new_zoom > 5.0:
-            new_zoom = 5.0
+        elif potential_new_zoom > 10.0: # Increased max zoom from 5.0 to 10.0
+            new_zoom = 10.0
         else:
             new_zoom = round(potential_new_zoom, 2)
 
@@ -615,11 +751,31 @@ class PDFBatchApp:
         self.image_on_canvas_width_px = pix.width
         self.image_on_canvas_height_px = pix.height
 
-        self.photo_image = tk.PhotoImage(data=pix.tobytes("ppm"))
+        # Get actual canvas dimensions
+        canvas_actual_width = self.canvas.winfo_width()
+        canvas_actual_height = self.canvas.winfo_height()
 
+        # Determine the drawing position and scrollregion
+        # If image is smaller than canvas, center it and make scrollregion same as canvas.
+        # If image is larger, draw at 0,0 of scrollregion and make scrollregion same as image.
+        
+        draw_x = 0
+        draw_y = 0
+        scroll_w = self.image_on_canvas_width_px
+        scroll_h = self.image_on_canvas_height_px
+
+        if self.image_on_canvas_width_px < canvas_actual_width:
+            draw_x = (canvas_actual_width - self.image_on_canvas_width_px) // 2
+            scroll_w = canvas_actual_width
+        if self.image_on_canvas_height_px < canvas_actual_height:
+            draw_y = (canvas_actual_height - self.image_on_canvas_height_px) // 2
+            scroll_h = canvas_actual_height
+
+        self.photo_image = tk.PhotoImage(data=pix.tobytes("ppm"))
         self.canvas.delete("pdf_image") # Delete only the old PDF image
-        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo_image, tags="pdf_image")
-        self.canvas.config(scrollregion=(0, 0, self.image_on_canvas_width_px, self.image_on_canvas_height_px))
+        self.canvas.create_image(draw_x, draw_y, anchor=tk.NW, image=self.photo_image, tags="pdf_image")
+        
+        self.canvas.config(scrollregion=(0, 0, scroll_w, scroll_h))
 
         self._update_page_nav_controls() # Update page display like "Page 1/X"
         self._draw_markers()
@@ -635,13 +791,22 @@ class PDFBatchApp:
         marker_radius = 5
         for i, pdf_coord in enumerate(self.coords_pdf):
             if pdf_coord:
-                canvas_coords = self._pdf_coords_to_canvas_coords(pdf_coord)
-                if canvas_coords:
+                # Get the base canvas coordinates of the PDF point (relative to PDF image's top-left on canvas)
+                relative_canvas_coords = self._pdf_coords_to_relative_canvas_coords(pdf_coord)
+                if relative_canvas_coords:
+                    # Add the offset of the PDF image on the canvas to get absolute canvas coordinates
+                    pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
+                    
+                    abs_canvas_x = relative_canvas_coords[0] + pdf_image_x_offset
+                    abs_canvas_y = relative_canvas_coords[1] + pdf_image_y_offset
+
                     color = MARKER_COLORS[i % len(MARKER_COLORS)]
                     marker_tag = f"marker_{i}" # Unique tag for each marker based on index
-                    self.canvas.create_rectangle(canvas_coords[0] - marker_radius, canvas_coords[1] - marker_radius,
-                                                 canvas_coords[0] + marker_radius, canvas_coords[1] + marker_radius,
+                    self.canvas.create_rectangle(abs_canvas_x - marker_radius, abs_canvas_y - marker_radius,
+                                                 abs_canvas_x + marker_radius, abs_canvas_y + marker_radius,
                                                  fill=color, outline=color, tags=(marker_tag, "marker")) # Add general "marker" tag too
+
+
 
     def _draw_placed_signatures(self):
         self.canvas.delete("signature_instance") # Delete all signature instances
@@ -649,10 +814,15 @@ class PDFBatchApp:
             return
 
         for idx, sig_data in enumerate(self.placed_signatures_data):
-            canvas_params = self._pdf_rect_to_canvas_rect_params(sig_data['pdf_rect_pts'])
-            if canvas_params:
-                canvas_x, canvas_y, canvas_w, canvas_h = canvas_params
-                
+            # Get relative canvas parameters (x,y,w,h) for the signature
+            relative_canvas_params = self._pdf_rect_to_relative_canvas_rect_params(sig_data['pdf_rect_pts'])
+            if relative_canvas_params:
+                rel_canvas_x, rel_canvas_y, canvas_w, canvas_h = relative_canvas_params
+
+                # Add the offset of the PDF image on the canvas
+                pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
+                abs_canvas_x = rel_canvas_x + pdf_image_x_offset
+                abs_canvas_y = rel_canvas_y + pdf_image_y_offset
                 # Ensure width and height are positive for PIL resize
                 if canvas_w <= 0 or canvas_h <= 0: continue
 
@@ -671,10 +841,21 @@ class PDFBatchApp:
                     continue
                 
                 sig_data['tk_photo'] = ImageTk.PhotoImage(pil_img_resized) # Keep reference
-                sig_data['canvas_item_id'] = self.canvas.create_image(canvas_x, canvas_y, anchor=tk.NW, image=sig_data['tk_photo'], tags=("signature_instance", f"sig_{idx}"))
+                sig_data['canvas_item_id'] = self.canvas.create_image(abs_canvas_x, abs_canvas_y, anchor=tk.NW, image=sig_data['tk_photo'], tags=("signature_instance", f"sig_{idx}"))
         # Selection highlights are now handled exclusively by _redraw_selection_highlights()
         self._redraw_selection_highlights() # Ensure highlights are correct after redrawing all signatures
-    def _pdf_coords_to_canvas_coords(self, pdf_coords_tuple):
+
+    def _get_pdf_image_offset_on_canvas(self):
+        """Returns the (x, y) offset of the 'pdf_image' item on the canvas."""
+        pdf_image_items = self.canvas.find_withtag("pdf_image")
+        if pdf_image_items:
+            coords = self.canvas.coords(pdf_image_items[0])
+            if coords:
+                return coords[0], coords[1] # x, y of the top-left corner
+        return 0, 0 # Default if not found or no coords
+
+    def _pdf_coords_to_relative_canvas_coords(self, pdf_coords_tuple):
+        """Converts PDF coordinates to canvas coordinates RELATIVE to the PDF image's top-left corner."""
         if not self.pdf_doc or self.pdf_page_width_pt == 0 or self.pdf_page_height_pt == 0:
             return None
         pdf_x_pt, pdf_y_pt_from_bottom = pdf_coords_tuple
@@ -688,6 +869,19 @@ class PDFBatchApp:
 
         return (canvas_x_on_image, canvas_y_on_image)
 
+    def _canvas_coords_to_pdf_coords(self, abs_canvas_x, abs_canvas_y):
+        """Converts absolute canvas click coordinates to PDF points (bottom-left origin)."""
+        if not self.pdf_doc or self.image_on_canvas_width_px == 0 or self.image_on_canvas_height_px == 0:
+            return None
+
+        pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
+        # Convert absolute canvas coords to coords relative to the PDF image
+        relative_canvas_x = abs_canvas_x - pdf_image_x_offset
+        relative_canvas_y = abs_canvas_y - pdf_image_y_offset
+
+        # Now use the existing logic with relative coordinates
+        return self._relative_canvas_coords_to_pdf_coords(relative_canvas_x, relative_canvas_y)
+
     def load_pdf_template(self):
         path = filedialog.askopenfilename(
             title="Select PDF File",
@@ -697,7 +891,13 @@ class PDFBatchApp:
             return
 
         self.pdf_path.set(path)
-        self.pdf_display_var.set(os.path.basename(path) if path else "(No file selected)")
+        filename = os.path.basename(path) if path else "(No file selected)"
+        self.pdf_display_var.set(filename)
+        # For CTkEntry, if state is disabled, we might need to temporarily enable to set, then disable
+        # self.pdf_display_entry.configure(state="normal")
+        # self.pdf_display_entry.delete(0, tk.END)
+        # self.pdf_display_entry.insert(0, filename)
+        # self.pdf_display_entry.configure(state="disabled")
         try:
             self.pdf_doc = fitz.open(path)
             if not self.pdf_doc.page_count > 0:
@@ -711,7 +911,7 @@ class PDFBatchApp:
 
             self.pdf_total_pages.set(self.pdf_doc.page_count)
             self.current_pdf_page_num.set(0) # Start at the first page
-            self.pdf_nav_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(0,2), before=self.status_label) # Show nav controls
+            self.pdf_nav_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(0,2)) # Show nav controls within right_pdf_panel
 
             if self.pdf_doc.page_count > 1:
                 self.signature_mode_active.set(True)
@@ -720,27 +920,31 @@ class PDFBatchApp:
             
             self._on_signature_mode_change() # Update UI based on mode
 
-            self.current_zoom_factor.set(1.0) # Reset zoom
-            self.zoom_display_var.set(f"Zoom: 100%")
-            # Calculate initial zoom to fit page (optional, or start at 100%)
-            # For simplicity, we start at 100% and user can zoom.
-            # If you want fit-to-page initially:
-            # self.master.update_idletasks()
-            # canvas_width_initial = self.canvas.winfo_width()
-            # canvas_height_initial = self.canvas.winfo_height()
-            # zoom_x_initial = canvas_width_initial / self.pdf_page_width_pt
-            # zoom_y_initial = canvas_height_initial / self.pdf_page_height_pt
-            # self.current_zoom_factor.set(min(zoom_x_initial, zoom_y_initial, 1.0)) # Fit or 100%
+            # Calculate initial zoom to fit page height
+            self.master.update_idletasks() # Ensure canvas dimensions are up-to-date
+            canvas_height_available = self.canvas.winfo_height()
+            
+            if self.pdf_page_height_pt > 0 and canvas_height_available > 10: # Avoid division by zero or tiny canvas
+                # Subtract a small margin for scrollbars or padding if necessary
+                effective_canvas_height = canvas_height_available - 5 # Small margin
+                zoom_to_fit_height = effective_canvas_height / self.pdf_page_height_pt
+                
+                # Clamp new_zoom to min/max values (same as in self.zoom)
+                new_initial_zoom = max(0.2, min(zoom_to_fit_height, 5.0))
+                self.current_zoom_factor.set(round(new_initial_zoom, 2))
+            else:
+                self.current_zoom_factor.set(1.0) # Default to 100% if calculation is not possible
+            self.zoom_display_var.set(f"Zoom: {int(self.current_zoom_factor.get() * 100)}%")
 
             self._redisplay_pdf_page(page_number=0) # Display first page
             
             if not self.signature_mode_active.get():
                 if self.num_excel_cols > 0:
-                    self.status_label.config(text=f"PDF file loaded. Click 'Move' next to a column to position it, or click on the image for chronological placement.")
+                    self.status_label.configure(text=f"PDF file loaded. Click 'Move' next to a column to position it, or click on the image for chronological placement.")
                     if self.is_text_preview_active and any(c is not None for c in self.coords_pdf): # Check if any coord is set
                         self._update_text_preview()
                 else:
-                    self.status_label.config(text="PDF file loaded. Load an Excel file to define text fields.")
+                    self.status_label.configure(text="PDF file loaded. Load an Excel file to define text fields.")
             # else: status already set by _on_signature_mode_change
             
             # No specific column is being set by "Move" button initially
@@ -751,7 +955,12 @@ class PDFBatchApp:
         except Exception as e:
             messagebox.showerror("Error Loading PDF", str(e))
             self.pdf_doc = None
-            self.pdf_display_var.set("(Error loading)")
+            error_msg = "(Error loading)"
+            self.pdf_display_var.set(error_msg)
+            # self.pdf_display_entry.configure(state="normal")
+            # self.pdf_display_entry.delete(0, tk.END)
+            # self.pdf_display_entry.insert(0, error_msg)
+            # self.pdf_display_entry.configure(state="disabled")
             self.pdf_path.set("")
             self._hide_and_reset_page_nav()
 
@@ -767,14 +976,23 @@ class PDFBatchApp:
         if not path:
             return
         self.excel_path.set(path)
-        self.excel_display_var.set(os.path.basename(path) if path else "(No file selected)")
+        filename = os.path.basename(path) if path else "(No file selected)"
+        self.excel_display_var.set(filename)
+        # self.excel_display_entry.configure(state="normal")
+        # self.excel_display_entry.delete(0, tk.END)
+        # self.excel_display_entry.insert(0, filename)
+        # self.excel_display_entry.configure(state="disabled")
+
         try:
             df = pd.read_excel(path, header=None) # Assume no header for simplicity, take first two columns
             if df.empty or df.shape[1] == 0:
                 messagebox.showerror("Error", "The Excel file is empty or contains no columns.")
                 self.excel_path.set("")
                 self.num_excel_cols = 0
-                self.excel_display_var.set("(Empty or invalid file)")
+                error_msg = "(Empty or invalid file)"
+                self.excel_display_var.set(error_msg)
+                # self.excel_display_entry.configure(state="normal"); self.excel_display_entry.delete(0, tk.END); self.excel_display_entry.insert(0, error_msg); self.excel_display_entry.configure(state="disabled")
+
                 self.coords_pdf = []
                 return
             
@@ -810,9 +1028,9 @@ class PDFBatchApp:
                 preview_text_summary += "Excel file is empty."
             self.excel_preview_text.set(preview_text_summary) # Store summary, not directly displayed as a label anymore
             if self.pdf_doc:
-                 self.status_label.config(text=f"Excel loaded ({self.num_excel_cols} cols). Click on image to position Col 1, or use 'Move'.")
+                 self.status_label.configure(text=f"Excel loaded ({self.num_excel_cols} cols). Click on image to position Col 1, or use 'Move'.")
             else:
-                 self.status_label.config(text=f"Excel loaded ({self.num_excel_cols} cols). Load PDF to start positioning.")
+                 self.status_label.configure(text=f"Excel loaded ({self.num_excel_cols} cols). Load PDF to start positioning.")
             self.excel_data_preview = df
             self.preview_row_index.set(0) # Reset to first row for preview
             self._update_preview_row_display_and_buttons() # Update buttons AFTER df is set
@@ -822,7 +1040,9 @@ class PDFBatchApp:
         except Exception as e:
             messagebox.showerror("Error Loading Excel", str(e))
             self.excel_path.set("")
-            self.excel_display_var.set("(Error loading)")
+            error_msg = "(Error loading)"
+            self.excel_display_var.set(error_msg)
+            # self.excel_display_entry.configure(state="normal"); self.excel_display_entry.delete(0, tk.END); self.excel_display_entry.insert(0, error_msg); self.excel_display_entry.configure(state="disabled")
             self.excel_preview_text.set("Excel Preview: (Error loading)")
             self.num_excel_cols = 0
             self.preview_row_index.set(0)
@@ -835,8 +1055,13 @@ class PDFBatchApp:
         if not path:
             return
         self.output_dir.set(path)
-        self.output_dir_display_var.set(os.path.basename(path) if path else "(No folder selected)")
-        self.status_label.config(text=f"Output folder selected: {path}")
+        dirname = os.path.basename(path) if path else "(No folder selected)"
+        self.output_dir_display_var.set(dirname)
+        # self.output_dir_display_entry.configure(state="normal")
+        # self.output_dir_display_entry.delete(0, tk.END)
+        # self.output_dir_display_entry.insert(0, dirname)
+        # self.output_dir_display_entry.configure(state="disabled")
+        self.status_label.configure(text=f"Output folder selected: {path}")
 
     def _hide_and_reset_page_nav(self):
         self.pdf_nav_frame.pack_forget()
@@ -853,26 +1078,37 @@ class PDFBatchApp:
         total_pages = self.pdf_total_pages.get()
         self.pdf_page_display_var.set(f"Page {current_page_0_indexed + 1}/{total_pages}")
 
-        self.prev_pdf_page_button.config(state=tk.NORMAL if current_page_0_indexed > 0 else tk.DISABLED)
-        self.next_pdf_page_button.config(state=tk.NORMAL if current_page_0_indexed < total_pages - 1 else tk.DISABLED)
+        self.prev_pdf_page_button.configure(state=tk.NORMAL if current_page_0_indexed > 0 else tk.DISABLED)
+        self.next_pdf_page_button.configure(state=tk.NORMAL if current_page_0_indexed < total_pages - 1 else tk.DISABLED)
 
     def _change_pdf_page(self, delta):
         new_page_num = self.current_pdf_page_num.get() + delta
         if 0 <= new_page_num < self.pdf_total_pages.get():
             self.current_pdf_page_num.set(new_page_num)
             self._redisplay_pdf_page(page_number=new_page_num) # This will also call _update_page_nav_controls
-    def _canvas_coords_to_pdf_coords(self, canvas_x, canvas_y):
-        """Converts canvas click coordinates to PDF points (bottom-left origin)."""
+    def _canvas_coords_to_pdf_coords(self, abs_canvas_x_param, abs_canvas_y_param): # Renamed params to avoid conflict
+        """Converts absolute canvas click coordinates to PDF points (bottom-left origin)."""
         if not self.pdf_doc or self.image_on_canvas_width_px == 0 or self.image_on_canvas_height_px == 0:
             return None
 
-        prop_x = canvas_x / self.image_on_canvas_width_px
-        prop_y = canvas_y / self.image_on_canvas_height_px
+        pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
+        # Convert absolute canvas coords to coords relative to the PDF image
+        relative_canvas_x = abs_canvas_x_param - pdf_image_x_offset
+        relative_canvas_y = abs_canvas_y_param - pdf_image_y_offset
+
+        # Now use the existing logic with relative coordinates
+        return self._relative_canvas_coords_to_pdf_coords(relative_canvas_x, relative_canvas_y)
+
+    def _relative_canvas_coords_to_pdf_coords(self, relative_canvas_x, relative_canvas_y):
+        """Converts canvas coordinates (relative to PDF image) to PDF points (bottom-left origin)."""
+        if not self.pdf_doc or self.image_on_canvas_width_px == 0 or self.image_on_canvas_height_px == 0: # Should be checked by caller
+            return None
+        prop_x = relative_canvas_x / self.image_on_canvas_width_px
+        prop_y = relative_canvas_y / self.image_on_canvas_height_px
 
         pdf_x_pt = prop_x * self.pdf_page_width_pt # Use original PDF width for calculation
         pdf_y_pt_from_top = prop_y * self.pdf_page_height_pt # Use original PDF height
         pdf_y_pt_from_bottom = self.pdf_page_height_pt - pdf_y_pt_from_top
-
         return (pdf_x_pt, pdf_y_pt_from_bottom)
 
     def _on_canvas_b1_press(self, event):
@@ -895,7 +1131,7 @@ class PDFBatchApp:
 
         # If not on a draggable item, this B1 press is for the canvas itself (pan or click-to-place).
         if not self.pdf_doc:
-            self.status_label.config(text="Please load a PDF file first.")
+            self.status_label.configure(text="Please load a PDF file first.")
             return
 
         # Store press coordinates and prepare for potential pan
@@ -923,8 +1159,10 @@ class PDFBatchApp:
             current_mouse_y_canvas = self.canvas.canvasy(event.y)
 
             # Convert current mouse to PDF coordinates (y from top)
-            current_mouse_pdf_x, current_mouse_pdf_y = self._canvas_pos_to_pdf_pos_tl(current_mouse_x_canvas, current_mouse_y_canvas)
-            if current_mouse_pdf_x is None: return "break" # Clicked outside image
+            pdf_pos_result = self._canvas_pos_to_pdf_pos_tl(current_mouse_x_canvas, current_mouse_y_canvas)
+            if pdf_pos_result is None: 
+                return "break" # Mouse is outside the PDF image area, do nothing further for resize.
+            current_mouse_pdf_x, current_mouse_pdf_y = pdf_pos_result
 
             new_rect = fitz.Rect(original_pdf_rect.x0, original_pdf_rect.y0, original_pdf_rect.x1, original_pdf_rect.y1)
             min_pdf_dim = 10 # Minimum dimension in PDF points
@@ -1023,7 +1261,7 @@ class PDFBatchApp:
             self.canvas.config(cursor="")
             # Final update of size in status or data model if needed
             if 0 <= sig_idx < len(self.placed_signatures_data):
-                 self.status_label.config(text=f"Signature {sig_idx+1} resized.")
+                 self.status_label.configure(text=f"Signature {sig_idx+1} resized.")
             
             self._build_dynamic_coord_controls() 
             self._redraw_selection_highlights() # Ensure handles are correctly redrawn after resize
@@ -1052,7 +1290,7 @@ class PDFBatchApp:
                 # The respective release handlers (on_marker_release, on_placed_signature_release)
                 # will clear _drag_data.                        
 
-            # Reset pan_data for the next B1 interaction on the canvas
+            # Reset pan_data for the next B1 interaction on the canvas (moved down)
             self._pan_data["is_potential_pan_or_click"] = False
             self._pan_data["has_dragged_for_pan"] = False
             # self._item_drag_active = False # Reset here if not reset in item's release
@@ -1073,10 +1311,10 @@ class PDFBatchApp:
                 try:
                     idx_to_update = self.coords_pdf.index(None) # Find first unassigned coordinate
                 except ValueError: # All coordinates are assigned
-                    self.status_label.config(text="All columns positioned. Use 'Move' button or drag markers to change.")
+                    self.status_label.configure(text="All columns positioned. Use 'Move' button or drag markers to change.")
                     return
             else: # No Excel loaded or no columns
-                self.status_label.config(text="Load Excel file to define columns for positioning.")
+                self.status_label.configure(text="Load Excel file to define columns for positioning.")
                 return
 
         if idx_to_update != -1:
@@ -1084,14 +1322,18 @@ class PDFBatchApp:
             canvas_x = self.canvas.canvasx(event.x)
             canvas_y = self.canvas.canvasy(event.y)
 
-            if not (0 <= canvas_x <= self.image_on_canvas_width_px and \
-                    0 <= canvas_y <= self.image_on_canvas_height_px):
-                self.status_label.config(text="Click within the image boundaries.")
+            pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
+            pdf_image_right_boundary = pdf_image_x_offset + self.image_on_canvas_width_px
+            pdf_image_bottom_boundary = pdf_image_y_offset + self.image_on_canvas_height_px
+
+            if not (pdf_image_x_offset <= canvas_x <= pdf_image_right_boundary and \
+                    pdf_image_y_offset <= canvas_y <= pdf_image_bottom_boundary):
+                self.status_label.configure(text="Click within the image boundaries.")
                 return
 
             pdf_coords = self._canvas_coords_to_pdf_coords(canvas_x, canvas_y)
             if not pdf_coords:
-                self.status_label.config(text="Error calculating coordinates.")
+                self.status_label.configure(text="Error calculating coordinates.")
                 return
 
             self.coords_pdf[idx_to_update] = pdf_coords
@@ -1105,7 +1347,7 @@ class PDFBatchApp:
             except ValueError: # All assigned
                 pass # next_unassigned_idx remains -1
             status_msg = f"Column {idx_to_update + 1} positioned. "
-            self.status_label.config(text=status_msg + (f"Click to position column {next_unassigned_idx + 1}." if next_unassigned_idx != -1 else "All columns positioned."))
+            self.status_label.configure(text=status_msg + (f"Click to position column {next_unassigned_idx + 1}." if next_unassigned_idx != -1 else "All columns positioned."))
             self.active_coord_to_set_idx = None # Reset specific "Move" selection after any click
             
             self._draw_markers() 
@@ -1120,7 +1362,7 @@ class PDFBatchApp:
         
         active_pil_idx = self.active_signature_pil_idx_to_place.get()
         if active_pil_idx == -1 or active_pil_idx >= len(self.loaded_signature_pil_images):
-            self.status_label.config(text="Please select a signature image from the list to place.")
+            self.status_label.configure(text="Please select a signature image from the list to place.")
             return
 
         canvas_x_click = self.canvas.canvasx(event.x)
@@ -1128,7 +1370,7 @@ class PDFBatchApp:
 
         if not (0 <= canvas_x_click <= self.image_on_canvas_width_px and \
                 0 <= canvas_y_click <= self.image_on_canvas_height_px):
-            self.status_label.config(text="Please click within the image boundaries.")
+            self.status_label.configure(text="Please click within the image boundaries.")
             return
 
         pdf_tl_x_pt, pdf_tl_y_pt = self._canvas_pos_to_pdf_pos_tl(canvas_x_click, canvas_y_click)
@@ -1156,7 +1398,7 @@ class PDFBatchApp:
         self.active_signature_pil_idx_to_place.set(-1) # Reset after placement
         self._build_dynamic_coord_controls() # Update sidebar
         
-        self.status_label.config(text=f"Signature '{display_name}' added. Click to select or drag.")
+        self.status_label.configure(text=f"Signature '{display_name}' added. Click to select or drag.")
     
     def on_marker_press(self, event):
         item = self.canvas.find_withtag(tk.CURRENT) # Get item under cursor
@@ -1231,7 +1473,7 @@ class PDFBatchApp:
             # self.coord_texts[current_col_idx].set(f"מיקום {current_col_idx+1}: ({pdf_coords[0]:.1f}, {pdf_coords[1]:.1f}) נק'")
             if current_col_idx < len(self.col_status_vars):
                  self.col_status_vars[current_col_idx].set("✔")
-            self.status_label.config(text=f"Column {current_col_idx + 1} position updated by dragging.")
+            self.status_label.configure(text=f"Column {current_col_idx + 1} position updated by dragging.")
 
         self._drag_data["item"] = None
         self._drag_data["col_idx"] = None
@@ -1260,7 +1502,7 @@ class PDFBatchApp:
             current_rtl_var = self.is_rtl_vars[col_idx] # Get the BooleanVar for this column
             current_rtl_var.set(not current_rtl_var.get()) # Toggle the boolean variable
             # The trace on is_rtl_vars will call _on_font_change, which updates the preview.
-            self.status_label.config(text=f"Column {col_idx + 1} direction changed to {'RTL' if current_rtl_var.get() else 'LTR'}.")
+            self.status_label.configure(text=f"Column {col_idx + 1} direction changed to {'RTL' if current_rtl_var.get() else 'LTR'}.")
 
     def on_placed_signature_press(self, event):
         # current_tags = self.canvas.gettags(tk.CURRENT) # Debug
@@ -1367,11 +1609,16 @@ class PDFBatchApp:
         self.canvas.delete("selection_highlight_tag") # Use a dedicated tag for highlights
         for idx, sig_data in enumerate(self.placed_signatures_data):
             if sig_data.get('selected', False): # No need to check for canvas_item_id, pdf_rect_pts is source
-                canvas_params = self._pdf_rect_to_canvas_rect_params(sig_data['pdf_rect_pts'])
-                if canvas_params:
-                    canvas_x, canvas_y, canvas_w, canvas_h = canvas_params
+                canvas_params = self._pdf_rect_to_relative_canvas_rect_params(sig_data['pdf_rect_pts'])
+                if canvas_params: # These are relative to the PDF image
+                    rel_canvas_x, rel_canvas_y, canvas_w, canvas_h = canvas_params
+                    
+                    # Get the PDF image's offset on the main canvas
+                    pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
+                    abs_canvas_x = rel_canvas_x + pdf_image_x_offset
+                    abs_canvas_y = rel_canvas_y + pdf_image_y_offset
                     self.canvas.create_rectangle(
-                        canvas_x, canvas_y, canvas_x + canvas_w, canvas_y + canvas_h,
+                        abs_canvas_x, abs_canvas_y, abs_canvas_x + canvas_w, abs_canvas_y + canvas_h,
                         outline="blue", width=2, dash=(4,2), 
                         tags=("selection_highlight_tag", f"highlight_for_sig_{idx}", "no_drag") # no_drag to prevent interference
                     )
@@ -1384,8 +1631,8 @@ class PDFBatchApp:
                     # Draw resize handles if this signature is selected
                     # Top-left, Top-right, Bottom-right, Bottom-left
                     handles_coords = [
-                        (canvas_x, canvas_y, "tl"), (canvas_x + canvas_w, canvas_y, "tr"),
-                        (canvas_x + canvas_w, canvas_y + canvas_h, "br"), (canvas_x, canvas_y + canvas_h, "bl")
+                        (abs_canvas_x, abs_canvas_y, "tl"), (abs_canvas_x + canvas_w, abs_canvas_y, "tr"),
+                        (abs_canvas_x + canvas_w, abs_canvas_y + canvas_h, "br"), (abs_canvas_x, abs_canvas_y + canvas_h, "bl")
                     ]
                     for h_x, h_y, h_type in handles_coords:
                         self.canvas.create_rectangle(
@@ -1410,7 +1657,7 @@ class PDFBatchApp:
         sig_idx = self._drag_data.get("sig_idx")
         if sig_idx is not None and 0 <= sig_idx < len(self.placed_signatures_data):
             sig_data = self.placed_signatures_data[sig_idx]
-            self.status_label.config(text=f"Signature moved. Width: {sig_data['pdf_rect_pts'].width:.1f}, Height: {sig_data['pdf_rect_pts'].height:.1f} pt")
+            self.status_label.configure(text=f"Signature moved. Width: {sig_data['pdf_rect_pts'].width:.1f}, Height: {sig_data['pdf_rect_pts'].height:.1f} pt")
         
         self._drag_data.clear() # Clear all drag data
         self._item_drag_active = False # Signal that item drag has ended
@@ -1506,7 +1753,11 @@ class PDFBatchApp:
                 else:
                     continue # Skip if data for this column is incomplete
 
-                canvas_coords = self._pdf_coords_to_canvas_coords(pdf_coord)
+                # Get relative canvas coordinates for the text
+                relative_canvas_coords = self._pdf_coords_to_relative_canvas_coords(pdf_coord)
+                pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
+                canvas_coords = (relative_canvas_coords[0] + pdf_image_x_offset, 
+                                 relative_canvas_coords[1] + pdf_image_y_offset)
                 if canvas_coords:
                     anchor_val = tk.SE if is_rtl_current else tk.SW
                     if current_tk_font:
@@ -1575,7 +1826,7 @@ class PDFBatchApp:
                 font_path = fm.findfont(font_family_selected)
             except Exception as e: # More general exception if findfont fails unexpectedly
                 messagebox.showerror("Font File Error", f"Could not find the font file for '{font_family_selected}'.\nTry selecting a different font.\nError: {e}")
-                self.status_label.config(text=f"Error: Font file not found for {font_family_selected}")
+                self.status_label.configure(text=f"Error: Font file not found for {font_family_selected}")
                 return
 
             # Load font once for metrics and use in insert_text
@@ -1585,7 +1836,7 @@ class PDFBatchApp:
                 messagebox.showerror("Font Load Error", f"Could not load the font '{font_family_selected}' from path '{font_path}'.\n{e}")
                 return
 
-            self.status_label.config(text="Processing files...")
+            self.status_label.configure(text="Processing files...")
             self.master.update_idletasks() # Update GUI
             
             num_files_generated = 0 # Initialize counter for generated files
@@ -1615,11 +1866,11 @@ class PDFBatchApp:
                 doc_copy.close()
                 num_files_generated += 1
 
-            self.status_label.config(text=f"Finished generating {num_files_generated} PDF files in: {self.output_dir.get()}")
+            self.status_label.configure(text=f"Finished generating {num_files_generated} PDF files in: {self.output_dir.get()}")
             messagebox.showinfo("Success", f"{num_files_generated} PDF files generated successfully!")
 
         except Exception as e:
-            self.status_label.config(text="Error during file generation.")
+            self.status_label.configure(text="Error during file generation.")
             messagebox.showerror("Processing Error", str(e))
 
     def generate_single_preview_pdf(self):
@@ -1673,7 +1924,7 @@ class PDFBatchApp:
             return
 
         try:
-            self.status_label.config(text="Generating current PDF...")
+            self.status_label.configure(text="Generating current PDF...")
             self.master.update_idletasks()
 
             row_data = self.excel_data_preview.iloc[current_row_idx]
@@ -1700,10 +1951,10 @@ class PDFBatchApp:
 
             doc_copy.save(output_filepath)
             doc_copy.close()
-            self.status_label.config(text=f"current PDF saved to: {output_filepath}")
+            self.status_label.configure(text=f"current PDF saved to: {output_filepath}")
             messagebox.showinfo("Success", f"current PDF saved successfully!")
         except Exception as e:
-            self.status_label.config(text="Error generating current PDF.")
+            self.status_label.configure(text="Error generating current PDF.")
             messagebox.showerror("Error Generating current PDF", str(e))
 
     # --- Signature Mode Methods ---
@@ -1722,8 +1973,8 @@ class PDFBatchApp:
             pil_image.load() # Ensure image data is loaded immediately
             display_name = os.path.basename(path)
             self.loaded_signature_pil_images.append((pil_image, path, display_name))
-            # References to self.loaded_signatures_listbox removed as the listbox itself was removed.
-            self.status_label.config(text=f"Signature image '{display_name}' loaded. Select it and click on the PDF to place.")
+            # References to self.loaded_signatures_listbox removed as the listbox itself was removed. # type: ignore
+            self.status_label.configure(text=f"Signature image '{display_name}' loaded. Select it and click on the PDF to place.")
         except Exception as e:
             messagebox.showerror("Error Loading Image", f"Could not load image: {path}\n{e}")
         
@@ -1755,7 +2006,7 @@ class PDFBatchApp:
             # sig_data['pdf_rect_pts'].y1 = sig_data['pdf_rect_pts'].y0 + new_height_pt
             # self.signature_height_var.set(round(new_height_pt,2)) # Variable removed
             # self._draw_placed_signatures() # Redraws images and then calls _redraw_selection_highlights()
-            self.status_label.config(text="Signature size updated.")
+            self.status_label.configure(text="Signature size updated.")
         except tk.TclError:
             messagebox.showerror("Error", "Invalid width value.")
         except Exception as e:
@@ -1772,7 +2023,7 @@ class PDFBatchApp:
             self.selected_placed_signature_idx.set(-1) # Deselect
             self._draw_placed_signatures() # Redraws images and then calls _redraw_selection_highlights()
             self._build_dynamic_coord_controls() # Update sidebar
-            self.status_label.config(text="Selected signature deleted.")
+            self.status_label.configure(text="Selected signature deleted.")
         except IndexError:
             # Should not happen if selected_idx check passes, but as a safeguard
             messagebox.showerror("Error", "Internal error: Could not find selected signature to delete.")
@@ -1809,7 +2060,7 @@ class PDFBatchApp:
         if not output_filepath: return
 
         try:
-            self.status_label.config(text="Creating signed PDF...")
+            self.status_label.configure(text="Creating signed PDF...")
             self.master.update_idletasks()
             
             doc_to_sign = fitz.open(self.pdf_path.get()) # Open fresh copy of original PDF
@@ -1826,20 +2077,25 @@ class PDFBatchApp:
             
             doc_to_sign.save(output_filepath, garbage=4, deflate=True) # Save with options
             doc_to_sign.close()
-            self.status_label.config(text=f"Signed PDF saved to: {output_filepath}")
+            self.status_label.configure(text=f"Signed PDF saved to: {output_filepath}")
             messagebox.showinfo("Success", "Signed PDF created and saved successfully!")
 
         except Exception as e:
-            self.status_label.config(text="Error creating signed PDF.")
+            self.status_label.configure(text="Error creating signed PDF.")
             messagebox.showerror("Error Creating Signed PDF", f"Error creating signed PDF: {e}")
 
     # Helper for signature rect conversion
-    def _pdf_rect_to_canvas_rect_params(self, pdf_rect_pts: fitz.Rect):
+    def _pdf_rect_to_relative_canvas_rect_params(self, pdf_rect_pts: fitz.Rect):
         # pdf_rect_pts is {x0,y0,x1,y1} in PDF points, y from top
-        # Returns (canvas_x_tl, canvas_y_tl, canvas_w, canvas_h)
+        # Returns (relative_canvas_x_tl, relative_canvas_y_tl, canvas_w, canvas_h)
+        # These are relative to the PDF image's top-left on the canvas.
         if not self.pdf_doc or self.pdf_page_width_pt == 0 or self.pdf_page_height_pt == 0 or \
            self.image_on_canvas_width_px == 0 or self.image_on_canvas_height_px == 0 : # Added check for canvas image dims
             return None
+
+        # No need to get canvas_actual_width/height here, as we are calculating relative to the PDF image itself.
+        # The PDF image's dimensions on canvas (self.image_on_canvas_width_px, self.image_on_canvas_height_px)
+        # already account for the zoom.
 
         # Convert PDF top-left to canvas top-left
         canvas_x_tl = (pdf_rect_pts.x0 / self.pdf_page_width_pt) * self.image_on_canvas_width_px
@@ -1853,13 +2109,23 @@ class PDFBatchApp:
         
         return canvas_x_tl, canvas_y_tl, canvas_w, canvas_h
 
-    def _canvas_pos_to_pdf_pos_tl(self, canvas_x, canvas_y):
-        # Converts a canvas top-left click coordinate to PDF top-left coordinate (points, y from top)
+    def _canvas_pos_to_pdf_pos_tl(self, abs_canvas_x, abs_canvas_y):
+        # Converts an absolute canvas top-left click coordinate to PDF top-left coordinate (points, y from top)
         if not self.pdf_doc or self.image_on_canvas_width_px == 0 or self.image_on_canvas_height_px == 0:
             return None
 
-        pdf_x_pt = (canvas_x / self.image_on_canvas_width_px) * self.pdf_page_width_pt
-        pdf_y_pt = (canvas_y / self.image_on_canvas_height_px) * self.pdf_page_height_pt
+        pdf_image_x_offset, pdf_image_y_offset = self._get_pdf_image_offset_on_canvas()
+        # Convert absolute canvas coords to coords relative to the PDF image
+        relative_canvas_x = abs_canvas_x - pdf_image_x_offset
+        relative_canvas_y = abs_canvas_y - pdf_image_y_offset
+
+        # Ensure the relative click is within the bounds of the PDF image itself
+        if not (0 <= relative_canvas_x <= self.image_on_canvas_width_px and \
+                0 <= relative_canvas_y <= self.image_on_canvas_height_px):
+            return None # Click was outside the PDF image area on canvas
+
+        pdf_x_pt = (relative_canvas_x / self.image_on_canvas_width_px) * self.pdf_page_width_pt
+        pdf_y_pt = (relative_canvas_y / self.image_on_canvas_height_px) * self.pdf_page_height_pt
         return pdf_x_pt, pdf_y_pt
 
     # --- Resize Handle Methods ---
@@ -1918,10 +2184,15 @@ class PDFBatchApp:
             return "break" # Consume the event
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    default_font = tkFont.nametofont("TkDefaultFont")
-    default_font.configure(family="Arial", size=10)
-    root.option_add("*Font", default_font)
+    customtkinter.set_appearance_mode("System")  # Modes: "System" (default), "Dark", "Light"
+    customtkinter.set_default_color_theme("blue")  # Themes: "blue" (default), "green", "dark-blue"
+
+    root = customtkinter.CTk()
+    
+    # Default font for CTk widgets is handled by the theme or can be set per widget.
+    # The root.option_add("*Font", default_font) is less common/effective for CTk.
+    # If a global font change is desired, it's often done by creating a CTkFont object
+    # and passing it to widgets, or by modifying the theme.
  
     app = PDFBatchApp(root)
     root.mainloop()
